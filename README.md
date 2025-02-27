@@ -32,4 +32,24 @@ Produces interactive plots (using Plotly) showing the top 100 players by predict
 ```
 pip install pandas numpy requests scikit-learn tensorflow keras_tuner joblib plotly
 ```
+**How to Run the Project**
 
+1. Data Ingestion:
+   Run the ingestion script to download and store the necessary data files locally:
+   ```
+   python data_ingestion.py
+   ```
+
+2. Full Pipeline Execution:
+   Run the main script to process the data, train the model, make predictions, and display interactive plots:
+   ```
+   python main.py
+   ```
+
+This script will:
+- Ingest data if not already present
+- Process the data by merging additional features like fixture difficulty
+- Normalize and convert data into sequences
+- Train the LSTM model with hyperparameter tuning
+- Predict next gameweek fantasy points
+- Plot the top 100 players by predicted points vs. price.
