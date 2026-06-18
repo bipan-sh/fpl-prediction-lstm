@@ -113,6 +113,11 @@ def _aggregate_to_player_round(df: pd.DataFrame) -> pd.DataFrame:
         spec["value"] = "last"
     if "opponent_team" in df.columns:
         spec["opponent_team"] = "first"
+    # If opponent strength was attached per-fixture, average it across a double
+    # gameweek's fixtures (mirrors how build_upcoming_features handles DGWs).
+    for c in ("opp_strength", "opp_strength_attack", "opp_strength_defence"):
+        if c in df.columns:
+            spec[c] = "mean"
 
     grouped = df.groupby(["player_id", "round"], as_index=False).agg(spec)
     n_fix = (
@@ -171,6 +176,9 @@ def build_feature_table(base_dir: str = "data") -> pd.DataFrame:
     pr = _read_players_raw(base_dir)
     teams = _read_teams(base_dir)
 
+    # Attach opponent strength per fixture, BEFORE aggregation, so double gameweeks
+    # average the two opponents' strength rather than keeping only the first.
+    raw = _attach_opponent_strength(raw, teams)
     pr_round = _aggregate_to_player_round(raw)
 
     # Attach static attributes (position, club, name) from players_raw.
@@ -190,7 +198,6 @@ def build_feature_table(base_dir: str = "data") -> pd.DataFrame:
     # Drop managers and rows with no position.
     pr_round = pr_round[pr_round["element_type"].isin(PLAYER_POSITIONS)].copy()
 
-    pr_round = _attach_opponent_strength(pr_round, teams)
     pr_round = _add_form_features(pr_round)
 
     # Targets.
@@ -286,7 +293,8 @@ def build_prior_profiles(
     pg_cols = [f"{s}_pg" for s in stats]
     roster["bucket"] = (
         roster.groupby("element_type")["price"]
-        .transform(lambda s: pd.qcut(s.rank(method="first"), n_price_buckets, labels=False))
+        .transform(lambda s: pd.qcut(s.rank(method="first"),
+                                     max(1, min(n_price_buckets, len(s))), labels=False))
     )
     fallback = roster.groupby(["element_type", "bucket"])[pg_cols].mean()
     have_prior = roster["n_games_prior"].notna()
@@ -389,7 +397,10 @@ def build_upcoming_features(
         raise FileNotFoundError("players_raw.csv required to build upcoming features.")
     meta = pr[["id", "element_type", "team", "now_cost", "first_name", "second_name"]].copy()
     meta["name"] = (meta["first_name"].fillna("") + " " + meta["second_name"].fillna("")).str.strip()
-    meta["value"] = meta["now_cost"]  # price*10, current and known in advance
+    # Current price (*10), known before kickoff. NB: for a live next-GW forecast this is
+    # correct; when back-forecasting a mid-season round it uses the latest price, not the
+    # price as it was that round (a minor mismatch that only affects the offline demo).
+    meta["value"] = meta["now_cost"]
     if feat.empty:  # no within-season history at all (e.g. forecasting GW1)
         feat = pd.DataFrame({"player_id": meta["id"], "games_played": 0})
     feat = feat.merge(meta, left_on="player_id", right_on="id", how="right").drop(columns=["id"])

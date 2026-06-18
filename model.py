@@ -37,12 +37,13 @@ try:  # optional faster engine
     _ENGINE = "lightgbm"
 
     def _make_regressor():
-        return LGBMRegressor(n_estimators=400, learning_rate=0.05,
-                             num_leaves=31, subsample=0.8, verbosity=-1)
+        # subsample needs subsample_freq>=1 to actually bag; set a seed for repeatability.
+        return LGBMRegressor(n_estimators=400, learning_rate=0.05, num_leaves=31,
+                             subsample=0.8, subsample_freq=1, random_state=42, verbosity=-1)
 
     def _make_classifier():
-        return LGBMClassifier(n_estimators=400, learning_rate=0.05,
-                              num_leaves=31, subsample=0.8, verbosity=-1)
+        return LGBMClassifier(n_estimators=400, learning_rate=0.05, num_leaves=31,
+                              subsample=0.8, subsample_freq=1, random_state=42, verbosity=-1)
 except Exception:  # pragma: no cover - fallback path
     from sklearn.ensemble import (
         HistGradientBoostingClassifier, HistGradientBoostingRegressor,
