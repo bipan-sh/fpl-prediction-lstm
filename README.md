@@ -27,6 +27,11 @@ report aligned to the wrong rows). The state of the art on free data uses
 - **Gradient-boosted trees, not LSTM** — match paid projection services on free data, are scale-invariant (no scaler-leakage), and handle missing early-season form natively.
 - **Hurdle structure** — the target is ~50% zeros (benched players). Modelling "will they play" separately is the single biggest accuracy lever in FPL.
 - **Walk-forward validation** — train on rounds `< t`, test on round `t`. Naive baselines (predict-last, trailing mean, season mean) are mandatory: a model that can't beat them has no edge.
+- **Availability downweight** — for a live forecast, predictions are scaled by the FPL API's current `status` / `chance_of_playing_next_round`, so injured/suspended/doubtful players are correctly demoted. This is the part the historical model can't learn (it never sees injury news).
+
+### Experiments kept as evidence (not in the default path)
+- `tune.py` — nested walk-forward hyperparameter search (its tuned config *is* the current default; ~2.4% MAE gain on the locked test).
+- `compare_models.py` + `MinutesHurdleModel` — a finer 3-band minutes hurdle (DNP / cameo / start). Tested head-to-head it was only ~0.8% better (within noise), so the simpler 2-part model remains the default. Kept so the decision is reproducible and the model is ready if more data shifts the verdict.
 
 ## Requirements
 

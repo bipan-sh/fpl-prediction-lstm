@@ -83,7 +83,12 @@ def main() -> None:
 
     upcoming = build_upcoming_features("data", target_round=forecast_round,
                                        prior_profiles=profiles)
-    upcoming["pred"] = model.predict(upcoming)
+    upcoming["raw_pred"] = model.predict(upcoming)
+    # Downweight injured/suspended/doubtful players using current availability
+    # (a live signal known before kickoff; illustrative only on the offline snapshot).
+    upcoming["pred"] = upcoming["raw_pred"] * upcoming["availability"]
+    flagged = int((upcoming["availability"] < 1.0).sum())
+    logger.info("Applied availability downweight to %d flagged players.", flagged)
 
     top = upcoming.sort_values("pred", ascending=False).head(15)
     logger.info("\nTop 15 FORECAST players for round %d (upcoming, unplayed):\n%s", forecast_round,

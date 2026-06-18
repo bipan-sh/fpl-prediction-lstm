@@ -100,12 +100,22 @@ def test_cold_start_seeds_gw1():
     print(f"  [ok] cold-start: GW1 unseeded NaN -> seeded {cov*100:.0f}% players with prior form")
 
 
+def test_availability_multiplier():
+    up = build_upcoming_features("data", target_round=27)
+    assert "availability" in up.columns
+    a = up["availability"]
+    assert ((a >= 0) & (a <= 1)).all(), "availability must be in [0, 1]"
+    assert (a < 1.0).any(), "expected some flagged (injured/suspended/doubtful) players"
+    print(f"  [ok] availability: range [{a.min():.2f}, {a.max():.2f}], {(a < 1).sum()} flagged")
+
+
 if __name__ == "__main__":
     tests = [
         test_feature_table_is_leakage_free,
         test_model_has_predictive_signal,
         test_optimizer_returns_legal_squad,
         test_cold_start_seeds_gw1,
+        test_availability_multiplier,
     ]
     failed = 0
     for fn in tests:

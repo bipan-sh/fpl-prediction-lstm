@@ -253,6 +253,31 @@ def _upcoming_fixture_context(
     return pd.DataFrame(out)
 
 
+def _availability_multiplier(feat: pd.DataFrame) -> np.ndarray:
+    """Injury/suspension downweight for a LIVE forecast, in [0, 1].
+
+    Uses the FPL API's current `status` (a=available, d=doubtful, i=injured,
+    s=suspended, u/n=unavailable) and `chance_of_playing_next_round` (0-100, null
+    when fully fit or fully out). These are known before kickoff, so applying them
+    is not leakage. Only meaningful on live data; on a historical snapshot they
+    reflect end-of-snapshot availability, so treat the offline demo as illustrative.
+    """
+    n = len(feat)
+    chance = feat["chance_of_playing_next_round"] if "chance_of_playing_next_round" in feat else pd.Series([np.nan] * n)
+    status = feat["status"] if "status" in feat else pd.Series(["a"] * n)
+    out = np.ones(n)
+    status = status.fillna("a").to_numpy()
+    chance = chance.to_numpy(dtype=float)
+    for i in range(n):
+        if not np.isnan(chance[i]):
+            out[i] = chance[i] / 100.0
+        elif status[i] in ("i", "s", "u", "n"):
+            out[i] = 0.0
+        elif status[i] == "d":
+            out[i] = 0.5
+    return out
+
+
 def build_prior_profiles(
     prior_base_dir: str, current_base_dir: Optional[str] = None, n_price_buckets: int = 5
 ) -> pd.DataFrame:
@@ -395,7 +420,11 @@ def build_upcoming_features(
     # Static attributes (position, club, price, name) from players_raw.
     if pr is None:
         raise FileNotFoundError("players_raw.csv required to build upcoming features.")
-    meta = pr[["id", "element_type", "team", "now_cost", "first_name", "second_name"]].copy()
+    meta_cols = ["id", "element_type", "team", "now_cost", "first_name", "second_name"]
+    for c in ("status", "chance_of_playing_next_round"):  # availability signals (live)
+        if c in pr.columns:
+            meta_cols.append(c)
+    meta = pr[meta_cols].copy()
     meta["name"] = (meta["first_name"].fillna("") + " " + meta["second_name"].fillna("")).str.strip()
     # Current price (*10), known before kickoff. NB: for a live next-GW forecast this is
     # correct; when back-forecasting a mid-season round it uses the latest price, not the
@@ -421,6 +450,7 @@ def build_upcoming_features(
     ctx = _upcoming_fixture_context(fixtures, teams, target_round)
     feat = feat.merge(ctx, on="team", how="inner")
     feat["round"] = target_round
+    feat["availability"] = _availability_multiplier(feat)
 
     # Cold start: early in a season the within-season form is thin/empty, so seed
     # it from the previous-season profile (fades out as games accumulate).
