@@ -20,6 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from data_processing import (
     build_feature_table, build_upcoming_features, build_prior_profiles, feature_columns,
+    next_unfinished_round,
 )
 from model import FPLPointsModel
 from optimizer import optimize_squad, SQUAD_QUOTA, XI_BOUNDS
@@ -109,6 +110,14 @@ def test_availability_multiplier():
     print(f"  [ok] availability: range [{a.min():.2f}, {a.max():.2f}], {(a < 1).sum()} flagged")
 
 
+def test_next_unfinished_round():
+    # The forecast target is the next unfinished GW from fixtures. The bundled
+    # 2024-25 archive has match data through round 26, so the next GW is 27.
+    nxt = next_unfinished_round("data")
+    assert nxt == 27, f"expected next unfinished round 27 on the archive, got {nxt}"
+    print(f"  [ok] next unfinished round = {nxt} (forecast target)")
+
+
 if __name__ == "__main__":
     tests = [
         test_feature_table_is_leakage_free,
@@ -116,6 +125,7 @@ if __name__ == "__main__":
         test_optimizer_returns_legal_squad,
         test_cold_start_seeds_gw1,
         test_availability_multiplier,
+        test_next_unfinished_round,
     ]
     failed = 0
     for fn in tests:

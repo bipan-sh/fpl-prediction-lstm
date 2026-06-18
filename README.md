@@ -43,13 +43,31 @@ pip install lightgbm
 
 ## How to run
 
+`main.py` is **season-aware**: it always forecasts the *next unfinished gameweek*
+(read from `fixtures.csv`) and picks the right mode automatically.
+
+**Mid-season** (enough gameweeks played):
 ```bash
-python data_ingestion.py     # download current-season data (needs network)
-python main.py               # build features, evaluate, predict, optimize squad
+python data_ingestion.py     # pull current-season data from the FPL API (needs internet)
+python main.py               # walk-forward eval + forecast the next GW + optimal squad
+# or in one step:
+FPL_INGEST=1 python main.py
 ```
 
-`main.py` works on whatever data is under `data/` (per-player `gw.csv` files with a
-`round` column, plus `players_raw.csv` and `teams.csv`).
+**Start of a new season** (e.g. forecasting 2026-27 GW1 in August 2026). There is no
+within-season form yet, so train on and seed from last season:
+```bash
+python data_ingestion.py                                  # pull the new season (once FPL publishes it)
+FPL_PRIOR_SEASON_DIR=data_2024_25 python main.py          # opener mode: skips eval, forecasts GW1
+```
+
+> **Important:** the repo ships a frozen **2024-25** snapshot under `data/`, so a plain
+> `python main.py` forecasts round 27 *of that archive* — it cannot show 2026-27 until
+> `data/` actually contains 2026-27 data. FPL only publishes the new season ~2 weeks
+> before kickoff (early August), so there is nothing to fetch before then.
+
+Useful env vars: `FPL_DATA_DIR` (point at a different data folder), `FPL_PRIOR_SEASON_DIR`
+(last season, for opener training + cold-start), `FPL_INGEST=1` (ingest before running).
 
 ## Backtest vs. forecast
 

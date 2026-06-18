@@ -73,7 +73,10 @@ def _load_player_gw(base_dir: str) -> pd.DataFrame:
     players_dir = os.path.join(base_dir, "players")
     files = sorted(glob.glob(os.path.join(players_dir, "*", "gw.csv")))
     if not files:
-        raise FileNotFoundError(f"No player gw.csv files under {players_dir}")
+        # A freshly-published season before GW1 has no match logs yet — that's a
+        # valid state (handled by the season-opener path), not an error.
+        logger.warning("No player gw.csv files under %s (no matches played yet?).", players_dir)
+        return pd.DataFrame()
     frames = []
     for f in files:
         try:
@@ -92,6 +95,8 @@ def _aggregate_to_player_round(df: pd.DataFrame) -> pd.DataFrame:
     so a player's DGW is a single, correctly-weighted observation rather than
     two fake consecutive "gameweeks".
     """
+    if df.empty:
+        return pd.DataFrame(columns=["player_id", "round"])
     if "round" not in df.columns:
         raise KeyError("Expected a 'round' column in the gameweek data.")
 
@@ -176,6 +181,11 @@ def build_feature_table(base_dir: str = "data") -> pd.DataFrame:
     pr = _read_players_raw(base_dir)
     teams = _read_teams(base_dir)
 
+    if raw.empty:  # no matches played yet (new-season opener) -> empty table
+        logger.info("No played gameweeks yet; returning an empty feature table.")
+        return pd.DataFrame(columns=["player_id", "round", "element_type",
+                                     "target_points", "target_appeared"])
+
     # Attach opponent strength per fixture, BEFORE aggregation, so double gameweeks
     # average the two opponents' strength rather than keeping only the first.
     raw = _attach_opponent_strength(raw, teams)
@@ -251,6 +261,20 @@ def _upcoming_fixture_context(
             "opp_strength_defence": opp_def,
         })
     return pd.DataFrame(out)
+
+
+def next_unfinished_round(base_dir: str = "data") -> Optional[int]:
+    """The next gameweek to forecast = the first fixture round not yet finished.
+
+    Works at any point in the calendar: mid-season it returns the next unplayed
+    GW; for a freshly-published new season (no fixtures finished) it returns 1;
+    if every fixture is finished (season over) it returns None.
+    """
+    fx = pd.read_csv(os.path.join(base_dir, "fixtures.csv"))
+    if "finished" not in fx.columns or "event" not in fx.columns:
+        return None
+    pending = fx[(~fx["finished"].astype(bool)) & fx["event"].notna()]
+    return int(pending["event"].min()) if not pending.empty else None
 
 
 def _availability_multiplier(feat: pd.DataFrame) -> np.ndarray:
