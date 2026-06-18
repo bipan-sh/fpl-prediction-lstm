@@ -18,8 +18,9 @@ report aligned to the wrong rows). The state of the art on free data uses
 | 2. Features | `data_processing.py` | Builds a **leakage-free** `(player, round)` table: real `round` time axis, double-gameweek aggregation, lagged/rolling form, xG/xA, ICT, BPS, fixture & opponent strength. |
 | 3. Model | `model.py` | **Position-specific hurdle model**: `P(player appears) × E[points | appeared]`, per position, using gradient-boosted trees. |
 | 4. Validation | `validation.py` | **Walk-forward (rolling-origin)** evaluation vs naive baselines, with rank/captaincy metrics — the only honest way to score a forecaster. |
-| 5. Optimization | `optimizer.py` | **Integer linear program** (`scipy.optimize.milp` / HiGHS) for the 15-man squad, XI, and captain under budget / quota / max-3-per-club / formation rules. |
-| 6. Orchestration | `main.py` | Runs evaluation, trains the final model, predicts the next round, and prints the optimal squad. |
+| 5. Tuning | `tune.py` | **Nested walk-forward** hyperparameter search: an inner walk-forward picks the model knobs; a locked, never-seen final-test block reports the honest gain. |
+| 6. Optimization | `optimizer.py` | **Integer linear program** (`scipy.optimize.milp` / HiGHS) for the 15-man squad, XI, and captain under budget / quota / max-3-per-club / formation rules. |
+| 7. Orchestration | `main.py` | Runs evaluation, trains the final model, predicts the next round, and prints the optimal squad. |
 
 ## Why these choices
 

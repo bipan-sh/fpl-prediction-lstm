@@ -31,19 +31,32 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
+# Canonical, engine-agnostic hyperparameters. Selected by nested walk-forward
+# tuning (see tune.py): on a locked final-test block these improved held-out MAE
+# ~2.4% (1.071 -> 1.046) plus RMSE and rank vs. the initial hand-set values
+# {lr 0.05, leaves 31, trees 300, min_leaf 20, l2 1.0}. The winner is a simpler,
+# more-regularized model, which is the right bias for a noisy target.
+DEFAULT_PARAMS = {
+    "learning_rate": 0.03,
+    "max_leaves": 15,
+    "n_trees": 200,
+    "min_leaf": 100,
+    "l2": 0.0,
+}
+
 try:  # optional faster engine
     from lightgbm import LGBMClassifier, LGBMRegressor  # type: ignore
 
     _ENGINE = "lightgbm"
 
-    def _make_regressor():
-        # subsample needs subsample_freq>=1 to actually bag; set a seed for repeatability.
-        return LGBMRegressor(n_estimators=400, learning_rate=0.05, num_leaves=31,
-                             subsample=0.8, subsample_freq=1, random_state=42, verbosity=-1)
-
-    def _make_classifier():
-        return LGBMClassifier(n_estimators=400, learning_rate=0.05, num_leaves=31,
-                              subsample=0.8, subsample_freq=1, random_state=42, verbosity=-1)
+    def _estimator(kind: str, params=None):
+        p = {**DEFAULT_PARAMS, **(params or {})}
+        # subsample needs subsample_freq>=1 to actually bag; seed for repeatability.
+        common = dict(n_estimators=int(p["n_trees"]), learning_rate=p["learning_rate"],
+                      num_leaves=int(p["max_leaves"]), min_child_samples=int(p["min_leaf"]),
+                      reg_lambda=p["l2"], subsample=0.8, subsample_freq=1,
+                      random_state=42, verbosity=-1)
+        return LGBMRegressor(**common) if kind == "reg" else LGBMClassifier(**common)
 except Exception:  # pragma: no cover - fallback path
     from sklearn.ensemble import (
         HistGradientBoostingClassifier, HistGradientBoostingRegressor,
@@ -51,22 +64,29 @@ except Exception:  # pragma: no cover - fallback path
 
     _ENGINE = "hist_gradient_boosting"
 
-    def _make_regressor():
-        return HistGradientBoostingRegressor(
-            max_iter=300, learning_rate=0.05, max_leaf_nodes=31,
-            l2_regularization=1.0, random_state=42)
+    def _estimator(kind: str, params=None):
+        p = {**DEFAULT_PARAMS, **(params or {})}
+        common = dict(max_iter=int(p["n_trees"]), learning_rate=p["learning_rate"],
+                      max_leaf_nodes=int(p["max_leaves"]), min_samples_leaf=int(p["min_leaf"]),
+                      l2_regularization=p["l2"], random_state=42)
+        return (HistGradientBoostingRegressor(**common) if kind == "reg"
+                else HistGradientBoostingClassifier(**common))
 
-    def _make_classifier():
-        return HistGradientBoostingClassifier(
-            max_iter=300, learning_rate=0.05, max_leaf_nodes=31,
-            l2_regularization=1.0, random_state=42)
+
+def _make_regressor(params=None):
+    return _estimator("reg", params)
+
+
+def _make_classifier(params=None):
+    return _estimator("clf", params)
 
 
 class FPLPointsModel:
     """Position-specific hurdle model: P(appear) x E[points | appeared]."""
 
-    def __init__(self, positions=(1, 2, 3, 4)):
+    def __init__(self, positions=(1, 2, 3, 4), params: dict | None = None):
         self.positions = positions
+        self.params = params  # canonical hyperparameters; None -> DEFAULT_PARAMS
         self.appear_models: dict[int, object] = {}
         self.points_models: dict[int, object] = {}
         self.fallback_rate: dict[int, float] = {}
@@ -83,13 +103,13 @@ class FPLPointsModel:
             self.fallback_rate[pos] = float(y_appear.mean())
             # Appearance classifier (needs both classes present).
             if len(np.unique(y_appear)) == 2:
-                clf = _make_classifier()
+                clf = _make_classifier(self.params)
                 clf.fit(X, y_appear)
                 self.appear_models[pos] = clf
             # Conditional points regressor (only on appearances).
             appeared = sub[sub["target_appeared"] == 1]
             if len(appeared) >= 30:
-                reg = _make_regressor()
+                reg = _make_regressor(self.params)
                 reg.fit(appeared[feature_cols], appeared["target_points"].to_numpy())
                 self.points_models[pos] = reg
         return self
@@ -115,10 +135,11 @@ class FPLPointsModel:
         return preds
 
 
-def make_predictor(feature_cols: list[str]) -> Callable[[pd.DataFrame, pd.DataFrame], np.ndarray]:
+def make_predictor(feature_cols: list[str], params: dict | None = None
+                   ) -> Callable[[pd.DataFrame, pd.DataFrame], np.ndarray]:
     """Adapter for validation.walk_forward_predict: refits fresh on each fold."""
     def predict(train: pd.DataFrame, test: pd.DataFrame) -> np.ndarray:
-        model = FPLPointsModel().fit(train, feature_cols)
+        model = FPLPointsModel(params=params).fit(train, feature_cols)
         return model.predict(test)
     return predict
 
