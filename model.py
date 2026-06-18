@@ -1,84 +1,141 @@
+"""
+Position-specific, hurdle-structured gradient-boosted model for FPL points.
+
+Why this replaces the LSTM
+--------------------------
+The strongest *free-data* public model, OpenFPL (2025), matches the paid
+FPL Review projections using position-specific ensembles of gradient-boosted
+trees -- not deep sequence models. Trees also sidestep two problems the old
+LSTM had: they need no feature scaling (so no scaler-leakage), and they handle
+missing values natively (so a player's early-season NaN form features are fine).
+
+Hurdle structure (handles the ~50%-zero, right-skewed target)
+-------------------------------------------------------------
+For each position we fit TWO models:
+  1. appear classifier:  P(player features for >= 1 minute)   [all rows]
+  2. points regressor:   E[points | the player appeared]      [appeared rows]
+The expected points is  P(appear) * E[points | appeared], clipped at 0.
+Modelling "will they play" separately is the single biggest accuracy lever in
+FPL, because minutes dominate the points distribution.
+
+Engine: LightGBM if installed, else sklearn HistGradientBoosting (same
+gradient-boosted-trees family; ships with scikit-learn, no extra install).
+"""
+from __future__ import annotations
+
+import logging
+from typing import Callable
+
 import numpy as np
-from sklearn.model_selection import train_test_split, KFold
-import tensorflow as tf
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from tensorflow.keras.callbacks import EarlyStopping
+import pandas as pd
 
-def build_model(input_shape):
-    model = Sequential()
-    # LSTM layer with dropout for regularization
-    model.add(LSTM(64, activation='tanh', input_shape=input_shape))
-    model.add(Dropout(0.2))
-    model.add(Dense(32, activation='relu'))
-    model.add(Dropout(0.2))
-    model.add(Dense(1))  # Predicting a single continuous value (fantasy points)
-    model.compile(optimizer='adam', loss='mean_squared_error', metrics=['mae'])
-    return model
+logger = logging.getLogger(__name__)
 
-def train_model(X, y, epochs=50, batch_size=32, validation_split=0.2):
-    # Split the data into training and testing sets
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
-    input_shape = (X_train.shape[1], X_train.shape[2])
-    model = build_model(input_shape)
-    model.summary()
-    
-    # Add early stopping to prevent overfitting
-    early_stopping = EarlyStopping(monitor='val_loss', patience=5, restore_best_weights=True)
-    
-    history = model.fit(
-        X_train, y_train,
-        epochs=epochs,
-        batch_size=batch_size,
-        validation_split=validation_split,
-        callbacks=[early_stopping],
-        verbose=1
+try:  # optional faster engine
+    from lightgbm import LGBMClassifier, LGBMRegressor  # type: ignore
+
+    _ENGINE = "lightgbm"
+
+    def _make_regressor():
+        return LGBMRegressor(n_estimators=400, learning_rate=0.05,
+                             num_leaves=31, subsample=0.8, verbosity=-1)
+
+    def _make_classifier():
+        return LGBMClassifier(n_estimators=400, learning_rate=0.05,
+                              num_leaves=31, subsample=0.8, verbosity=-1)
+except Exception:  # pragma: no cover - fallback path
+    from sklearn.ensemble import (
+        HistGradientBoostingClassifier, HistGradientBoostingRegressor,
     )
-    
-    # Evaluate the model on test data
-    loss, mae = model.evaluate(X_test, y_test, verbose=0)
-    print("Test Loss: {:.4f}, Test MAE: {:.4f}".format(loss, mae))
-    
-    # Optionally, perform K-Fold cross validation
-    kf = KFold(n_splits=5, shuffle=True, random_state=42)
-    cv_losses = []
-    cv_maes = []
-    for train_index, test_index in kf.split(X):
-        X_cv_train, X_cv_test = X[train_index], X[test_index]
-        y_cv_train, y_cv_test = y[train_index], y[test_index]
-        cv_model = build_model(input_shape)
-        cv_model.fit(X_cv_train, y_cv_train, epochs=epochs, batch_size=batch_size, validation_split=validation_split, verbose=0)
-        loss_cv, mae_cv = cv_model.evaluate(X_cv_test, y_cv_test, verbose=0)
-        cv_losses.append(loss_cv)
-        cv_maes.append(mae_cv)
-    print("Cross Validation Loss: {:.4f} ± {:.4f}".format(np.mean(cv_losses), np.std(cv_losses)))
-    print("Cross Validation MAE: {:.4f} ± {:.4f}".format(np.mean(cv_maes), np.std(cv_maes)))
-    
-    return model, history
 
-def predict_next_gameweek(model, player_gw_df, seq_length=5, feature_cols=['minutes', 'goals', 'assists']):
-    """
-    For each player in the aggregated gameweek data, extract the most recent sequence of length 'seq_length'
-    and use the trained model to predict the fantasy points for the next gameweek.
-    Returns a dictionary mapping player_id to predicted fantasy points.
-    """
-    predictions = {}
-    # Ensure data is sorted by player_id and gameweek
-    sorted_df = player_gw_df.sort_values(['player_id', 'gameweek'])
-    for player in sorted_df['player_id'].unique():
-        player_data = sorted_df[sorted_df['player_id'] == player].reset_index(drop=True)
-        if len(player_data) >= seq_length:
-            seq = player_data.iloc[-seq_length:][feature_cols].values
-            seq = np.expand_dims(seq, axis=0)  # shape (1, seq_length, num_features)
-            pred = model.predict(seq)
-            predictions[player] = pred[0, 0]
-    return predictions
+    _ENGINE = "hist_gradient_boosting"
+
+    def _make_regressor():
+        return HistGradientBoostingRegressor(
+            max_iter=300, learning_rate=0.05, max_leaf_nodes=31,
+            l2_regularization=1.0, random_state=42)
+
+    def _make_classifier():
+        return HistGradientBoostingClassifier(
+            max_iter=300, learning_rate=0.05, max_leaf_nodes=31,
+            l2_regularization=1.0, random_state=42)
+
+
+class FPLPointsModel:
+    """Position-specific hurdle model: P(appear) x E[points | appeared]."""
+
+    def __init__(self, positions=(1, 2, 3, 4)):
+        self.positions = positions
+        self.appear_models: dict[int, object] = {}
+        self.points_models: dict[int, object] = {}
+        self.fallback_rate: dict[int, float] = {}
+        self.feature_cols: list[str] = []
+
+    def fit(self, train: pd.DataFrame, feature_cols: list[str]) -> "FPLPointsModel":
+        self.feature_cols = feature_cols
+        for pos in self.positions:
+            sub = train[train["element_type"] == pos]
+            if len(sub) < 50:
+                continue
+            X = sub[feature_cols]
+            y_appear = sub["target_appeared"].to_numpy()
+            self.fallback_rate[pos] = float(y_appear.mean())
+            # Appearance classifier (needs both classes present).
+            if len(np.unique(y_appear)) == 2:
+                clf = _make_classifier()
+                clf.fit(X, y_appear)
+                self.appear_models[pos] = clf
+            # Conditional points regressor (only on appearances).
+            appeared = sub[sub["target_appeared"] == 1]
+            if len(appeared) >= 30:
+                reg = _make_regressor()
+                reg.fit(appeared[feature_cols], appeared["target_points"].to_numpy())
+                self.points_models[pos] = reg
+        return self
+
+    def _predict_pos(self, pos: int, X: pd.DataFrame) -> np.ndarray:
+        reg = self.points_models.get(pos)
+        if reg is None:
+            return np.zeros(len(X))
+        cond = np.clip(reg.predict(X), 0, None)
+        clf = self.appear_models.get(pos)
+        if clf is not None:
+            p_appear = clf.predict_proba(X)[:, 1]
+        else:
+            p_appear = np.full(len(X), self.fallback_rate.get(pos, 1.0))
+        return p_appear * cond
+
+    def predict(self, df: pd.DataFrame) -> np.ndarray:
+        preds = np.zeros(len(df))
+        for pos in self.positions:
+            mask = (df["element_type"] == pos).to_numpy()
+            if mask.any():
+                preds[mask] = self._predict_pos(pos, df.loc[mask, self.feature_cols])
+        return preds
+
+
+def make_predictor(feature_cols: list[str]) -> Callable[[pd.DataFrame, pd.DataFrame], np.ndarray]:
+    """Adapter for validation.walk_forward_predict: refits fresh on each fold."""
+    def predict(train: pd.DataFrame, test: pd.DataFrame) -> np.ndarray:
+        model = FPLPointsModel().fit(train, feature_cols)
+        return model.predict(test)
+    return predict
+
+
+def engine_name() -> str:
+    return _ENGINE
+
 
 if __name__ == "__main__":
-    # For testing purposes, if this file is run standalone, generate dummy data
-    X_dummy = np.random.rand(100, 5, 3)
-    y_dummy = np.random.rand(100)
-    model, history = train_model(X_dummy, y_dummy)
-    preds = predict_next_gameweek(model, np.random.rand(10,6,3))  # dummy call
-    print(preds)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    from data_processing import build_feature_table, feature_columns
+
+    table = build_feature_table()
+    feats = feature_columns(table)
+    train = table[table["round"] < 24]
+    test = table[table["round"] == 24].copy()
+    model = FPLPointsModel().fit(train, feats)
+    test["pred"] = model.predict(test)
+    print(f"Engine: {_ENGINE}")
+    print(test.sort_values("pred", ascending=False)
+          [["name", "element_type", "pred", "target_points"]].head(10).to_string())

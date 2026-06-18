@@ -1,153 +1,108 @@
-import os
-import logging
-import pandas as pd
-import numpy as np
-import plotly.express as px
-from data_ingestion import ingest_data
-from data_processing import process_data
-from model import train_model, predict_next_gameweek
+"""
+FPL prediction + decision pipeline (rebuilt).
 
-# Configure logging
+Stages:
+  1. Build the leakage-free (player, round) feature table.
+  2. Walk-forward evaluation: the hurdle GBT model vs naive baselines on
+     identical rolling-origin splits (the only honest way to judge a forecaster).
+  3. Train a final model on all-but-the-last round and predict the next round.
+  4. Optimize a legal 15-man squad + XI + captain from those predictions.
+
+Run:  python main.py
+"""
+from __future__ import annotations
+
+import logging
+
+import pandas as pd
+
+import os
+
+from data_processing import (
+    build_feature_table, build_upcoming_features, build_prior_profiles,
+    feature_columns, POSITION_MAP,
+)
+from model import FPLPointsModel, make_predictor, engine_name
+from validation import evaluate_all
+from optimizer import optimize_squad
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("fpl_prediction.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("fpl_prediction.log"), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
-def plot_top100_price_vs_points(predictions: dict, player_gw_df: pd.DataFrame, 
-                                player_idlist_df: pd.DataFrame, playerraw_df: pd.DataFrame):
-    """
-    Plots a scatter plot of price vs. predicted fantasy points for the top 100 players.
-    Each point is labeled with the player's name and colored by position:
-      - Goalkeeper (element_type 1): blue
-      - Defender (element_type 2): green
-      - Midfielder (element_type 3): red
-      - Striker (element_type 4): purple
-    If playerraw_df is None, assigns default position (Unknown) with color gray.
-    The 'value' is divided by 10 to display the dollar price.
-    """
-    # Convert predictions dictionary to DataFrame
-    pred_df = pd.DataFrame(list(predictions.items()), columns=['player_id', 'predicted_points'])
-    pred_df['player_id'] = pred_df['player_id'].astype(int)
-    
-    # Get the latest record per player (assuming higher gameweek means more recent)
-    latest_player = player_gw_df.sort_values('gameweek').groupby('player_id').tail(1)
-    latest_player = latest_player[['player_id', 'value']]
-    latest_player['dollar_value'] = latest_player['value'] / 10.0  # convert to dollars
-    
-    # Merge predictions with latest price data
-    merged = pd.merge(pred_df, latest_player, on='player_id', how='inner')
-    
-    # Merge with player_idlist to get full names
-    merged = pd.merge(merged, player_idlist_df[['id', 'first_name', 'second_name']], 
-                      left_on='player_id', right_on='id', how='left')
-    merged['full_name'] = merged['first_name'] + " " + merged['second_name']
-    
-    # Merge with playerraw_df if available to get position; if not, assign default
-    if playerraw_df is not None:
-        merged = pd.merge(merged, playerraw_df[['id', 'element_type']], 
-                          left_on='player_id', right_on='id', how='left')
-    else:
-        merged['element_type'] = 0  # unknown position
-    
-    # Map element_type to colors
-    position_colors = {1: 'blue', 2: 'green', 3: 'red', 4: 'purple'}
-    merged['color'] = merged['element_type'].map(position_colors)
-    merged['color'] = merged['color'].fillna('gray')
-    
-    # Sort by predicted points descending and select top 100 players
-    top100 = merged.sort_values('predicted_points', ascending=False).head(100)
-    
-    # Create interactive scatter plot with Plotly
-    fig = px.scatter(
-        top100, x='dollar_value', y='predicted_points',
-        color='color', hover_name='full_name',
-        labels={'dollar_value': 'Price ($)', 'predicted_points': 'Predicted Fantasy Points'},
-        title='Top 100 Players by Predicted Fantasy Points vs Price'
+N_TEST_ROUNDS = 6      # evaluate on the most recent N rounds
+MIN_TRAIN_ROUNDS = 8   # require at least this much history before scoring a round
+
+
+def main() -> None:
+    pd.set_option("display.width", 140)
+    logger.info("Building leakage-free feature table...")
+    table = build_feature_table("data")
+    feats = feature_columns(table)
+    logger.info("Model engine: %s | %d features", engine_name(), len(feats))
+
+    max_round = int(table["round"].max())
+    test_rounds = list(range(max_round - N_TEST_ROUNDS + 1, max_round + 1))
+
+    logger.info("Walk-forward evaluation on rounds %s (model vs baselines)...", test_rounds)
+    results = evaluate_all(
+        table,
+        model_predictor=make_predictor(feats),
+        test_rounds=test_rounds,
+        min_train_rounds=MIN_TRAIN_ROUNDS,
     )
-    fig.update_traces(marker=dict(size=10, line=dict(width=1, color='black')))
-    fig.show()
+    logger.info("\n===== Walk-forward results (lower MAE/RMSE better; higher spearman/captain better) =====\n%s",
+                results.to_string(index=False))
 
-def analyze_errors(model, X_test: np.ndarray, y_test: np.ndarray, 
-                   player_gw_df: pd.DataFrame, player_idlist_df: pd.DataFrame):
-    """
-    Analyzes prediction errors and identifies players with the largest errors.
-    """
-    # Make predictions
-    y_pred = model.predict(X_test)
-    
-    # Calculate errors
-    errors = np.abs(y_test - y_pred.flatten())
-    
-    # Get player IDs and gameweeks from X_test
-    player_ids = player_gw_df['player_id'].values
-    gameweeks = player_gw_df['gameweek'].values
-    
-    # Create DataFrame for error analysis
-    error_df = pd.DataFrame({
-        'player_id': player_ids[-len(y_test):],  # Match test set size
-        'gameweek': gameweeks[-len(y_test):],
-        'actual_points': y_test,
-        'predicted_points': y_pred.flatten(),
-        'error': errors
-    })
-    
-    # Merge with player_idlist to get names
-    error_df = pd.merge(error_df, player_idlist_df[['id', 'first_name', 'second_name']], 
-                        left_on='player_id', right_on='id', how='left')
-    error_df['full_name'] = error_df['first_name'] + " " + error_df['second_name']
-    
-    # Sort by largest errors
-    top_errors = error_df.sort_values('error', ascending=False).head(10)
-    
-    # Log top errors
-    logger.info("\nTop 10 Players with Largest Prediction Errors:")
-    logger.info(top_errors[['full_name', 'gameweek', 'actual_points', 'predicted_points', 'error']])
+    model_mae = results.loc[results["method"] == "model", "MAE"].iloc[0]
+    best_baseline = results[results["method"] != "model"].sort_values("MAE").iloc[0]
+    verdict = "BEATS" if model_mae < best_baseline["MAE"] else "DOES NOT beat"
+    logger.info("Model %s the best baseline (%s): MAE %.3f vs %.3f",
+                verdict, best_baseline["method"], model_mae, best_baseline["MAE"])
 
-def main():
-    logger.info("Starting data ingestion...")
-    ingest_data()
-    logger.info("Data ingestion completed.\n")
-    
-    logger.info("Starting data processing...")
-    data = process_data()
-    if data["X"] is None or data["y"] is None or data["player_gw_df"] is None:
-        logger.error("No sequences created or no player gameweek data available. Exiting.")
-        return
-    logger.info("Data processing completed.\n")
-    
-    logger.info("Starting model training...")
-    X = data["X"]
-    y = data["y"]
-    model, history = train_model(X, y)
-    logger.info("Model training completed.\n")
-    
-    logger.info("Predicting next gameweek fantasy points for each player...")
-    predictions = predict_next_gameweek(model=model, player_gw_df=data["player_gw_df"])
-    
-    # Use player_idlist and playerraw_df for mapping names and positions
-    player_idlist_df = data["player_idlist_df"]
-    playerraw_df = data["playerraw_df"]
-    
-    logger.info("\nPredictions:")
-    for pid, pred in predictions.items():
-        name_info = player_idlist_df.loc[player_idlist_df['id'] == pid, ['first_name', 'second_name']]
-        if not name_info.empty:
-            full_name = name_info.iloc[0]['first_name'] + " " + name_info.iloc[0]['second_name']
-        else:
-            full_name = f"Player {pid}"
-        logger.info(f"{full_name} (ID: {pid}): Predicted fantasy points for next gameweek = {pred:.2f}")
-    
-    logger.info("\nPlotting Top 100 Players: Price vs Predicted Fantasy Points...")
-    plot_top100_price_vs_points(predictions, data["player_gw_df"], player_idlist_df, playerraw_df)
-    
-    logger.info("\nAnalyzing prediction errors...")
-    analyze_errors(model, X_test=X[-len(y)//5:], y_test=y[-len(y)//5:],  # Use last 20% as test set
-                   player_gw_df=data["player_gw_df"], player_idlist_df=player_idlist_df)
+    # ---- FORECAST the next, NOT-YET-PLAYED gameweek (the real use case) ----
+    # Train on ALL available data, then predict round (max_round + 1) using each
+    # player's form so far + that round's known fixtures. There are no actuals
+    # for this round -- it is a genuine forecast, not a re-scored past gameweek.
+    forecast_round = max_round + 1
+    logger.info("Training final model on all data and FORECASTING round %d (no actuals)...",
+                forecast_round)
+    model = FPLPointsModel().fit(table, feats)
+
+    # Cold start: at the start of a NEW season there is no within-season form, so
+    # seed early gameweeks from the previous season. Point FPL_PRIOR_SEASON_DIR at
+    # last season's ingested data to enable it; mid-season it is unnecessary.
+    prior_dir = os.environ.get("FPL_PRIOR_SEASON_DIR")
+    profiles = None
+    if prior_dir:
+        logger.info("Cold-start enabled: seeding from prior season at %s", prior_dir)
+        profiles = build_prior_profiles(prior_dir, current_base_dir="data")
+
+    upcoming = build_upcoming_features("data", target_round=forecast_round,
+                                       prior_profiles=profiles)
+    upcoming["pred"] = model.predict(upcoming)
+
+    top = upcoming.sort_values("pred", ascending=False).head(15)
+    logger.info("\nTop 15 FORECAST players for round %d (upcoming, unplayed):\n%s", forecast_round,
+                top.assign(pos=top["element_type"].map(POSITION_MAP))
+                   [["name", "pos", "value", "pred"]].to_string(index=False))
+
+    # ---- Optimize squad on the forecast ----
+    logger.info("Optimizing squad under FPL constraints for round %d...", forecast_round)
+    players = upcoming.rename(columns={"element_type": "pos"})
+    players["price"] = players["value"] / 10.0
+    sol = optimize_squad(players[["player_id", "name", "pos", "team", "price", "pred"]])
+    squad = sol.squad.assign(pos=lambda d: d["pos"].map(POSITION_MAP))
+    logger.info("\n===== Optimal squad (£%.1fm, XI expected %.1f pts) =====\n%s",
+                sol.total_cost, sol.xi_expected_points,
+                squad[["name", "pos", "team", "price", "pred", "in_xi", "is_captain"]]
+                .to_string(index=False))
+    captain = squad[squad["is_captain"]].iloc[0]
+    logger.info("Captain: %s (%.1f predicted pts, doubled)", captain["name"], captain["pred"])
+
 
 if __name__ == "__main__":
     main()
