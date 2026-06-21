@@ -45,13 +45,20 @@ def optimize_squad(
     players: pd.DataFrame,
     budget: float = 100.0,
     pred_col: str = "pred",
+    force_in: list | None = None,
+    exclude: list | None = None,
 ) -> SquadSolution:
     """Select the optimal 15-man squad, XI and captain.
 
     `players` must have columns: player_id, name, pos (1-4), team, price, <pred_col>.
+    `force_in` player_ids are pinned into the squad; `exclude` player_ids are dropped
+    (used by the web UI's lock / ban controls). `budget` is in millions.
     """
     df = players.dropna(subset=["pos", "team", "price", pred_col]).copy()
-    df = df[df["pos"].isin(SQUAD_QUOTA)].reset_index(drop=True)
+    df = df[df["pos"].isin(SQUAD_QUOTA)].copy()
+    if exclude:
+        df = df[~df["player_id"].isin(exclude)]
+    df = df.reset_index(drop=True)
     n = len(df)
     if n < 15:
         raise ValueError(f"Need >=15 eligible players, got {n}")
@@ -91,6 +98,14 @@ def optimize_squad(
     # Max 3 per club.
     for tm in np.unique(teams):
         add({SQ + i: 1 for i in range(n) if teams[i] == tm}, 0, 3)
+
+    # Pin user-locked players into the squad.
+    if force_in:
+        ids = df["player_id"].to_numpy()
+        for pid in force_in:
+            idx = np.where(ids == pid)[0]
+            if len(idx):
+                add({SQ + int(idx[0]): 1}, 1, 1)
 
     # Starting XI: exactly 11, must be in squad, legal formation.
     add({XI + i: 1 for i in range(n)}, 11, 11)

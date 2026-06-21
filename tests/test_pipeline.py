@@ -82,7 +82,18 @@ def test_optimizer_returns_legal_squad():
     assert sq["is_captain"].sum() == 1, "exactly one captain"
     cap = sq[sq["is_captain"]].iloc[0]
     assert cap["in_xi"], "captain not in starting XI"
-    print(f"  [ok] optimizer: legal squad £{sol.total_cost:.1f}m, captain {cap['name']}")
+
+    # Web UI controls: excluding the captain must drop them; locking pins a player in.
+    cols = ["player_id", "name", "pos", "team", "price", "pred"]
+    cap_id = int(cap["player_id"])
+    s2 = optimize_squad(players[cols], budget=90.0, exclude=[cap_id])
+    assert cap_id not in s2.squad["player_id"].values, "excluded player still selected"
+    assert s2.total_cost <= 90.0 + 1e-6, "exclude+budget not respected"
+    cheap = int(players[cols].sort_values("price").iloc[0]["player_id"])
+    s3 = optimize_squad(players[cols], force_in=[cheap])
+    assert cheap in s3.squad["player_id"].values, "locked player not selected"
+    print(f"  [ok] optimizer: legal squad £{sol.total_cost:.1f}m, captain {cap['name']}; "
+          f"lock/exclude respected")
 
 
 def test_cold_start_seeds_gw1():

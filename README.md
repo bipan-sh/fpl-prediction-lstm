@@ -69,6 +69,27 @@ FPL_PRIOR_SEASON_DIR=data_2024_25 python main.py          # opener mode: skips e
 Useful env vars: `FPL_DATA_DIR` (point at a different data folder), `FPL_PRIOR_SEASON_DIR`
 (last season, for opener training + cold-start), `FPL_INGEST=1` (ingest before running).
 
+## Web app
+
+A zero-dependency web UI (stdlib `http.server` only — no Flask/Django/Node needed):
+
+```bash
+python serve.py            # runs the pipeline once, then serves on http://localhost:8000
+# pick another port / season:
+PORT=8770 FPL_PRIOR_SEASON_DIR=data_2024_25 python serve.py
+```
+
+Open the URL in a browser. The app (`web/`) gives you:
+- **Optimal XI on a pitch** — the ILP squad laid out by formation, captain armband, bench.
+- **Live re-optimise** — drag the budget or lock/exclude players and the XI re-solves
+  server-side via the real optimiser (`GET /api/optimize`).
+- **Player explorer** — searchable, sortable, filterable table (position, team, availability)
+  of every player's predicted points, form, price and value (points per £m).
+- **Value map** — price vs predicted-points scatter; players in the optimal squad are ringed.
+- Headline model accuracy (walk-forward MAE vs the naive baseline) shown up top.
+
+API: `GET /api/data` (predictions + default squad), `GET /api/optimize?budget=&lock=&exclude=`.
+
 ## Backtest vs. forecast
 
 `main.py` does two distinct things, and it is important not to confuse them:
