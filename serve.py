@@ -47,6 +47,7 @@ def _fingerprint() -> dict:
     def mtime(p):
         return os.path.getmtime(p) if os.path.exists(p) else 0
     return {
+        "v": 2,  # bump when the pipeline/feature set changes so the cache rebuilds
         "dir": os.path.abspath(DATA_DIR),
         "prior": os.environ.get("FPL_PRIOR_SEASON_DIR", ""),
         "n_gw": len(glob.glob(os.path.join(DATA_DIR, "players", "*", "gw.csv"))),

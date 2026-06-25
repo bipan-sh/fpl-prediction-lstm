@@ -32,6 +32,7 @@ report aligned to the wrong rows). The state of the art on free data uses
 ### Experiments kept as evidence (not in the default path)
 - `tune.py` — nested walk-forward hyperparameter search (its tuned config *is* the current default; ~2.4% MAE gain on the locked test).
 - `compare_models.py` + `MinutesHurdleModel` — a finer 3-band minutes hurdle (DNP / cameo / start). Tested head-to-head it was only ~0.8% better (within noise), so the simpler 2-part model remains the default. Kept so the decision is reproducible and the model is ready if more data shifts the verdict.
+- `compare_understat.py` + `attach_understat()` — joins Understat npxG/shots/key_passes/xGChain. Measured lift was ~0.1% (within noise) because FPL's data already carries Opta xG, so it's **off by default** (`build_feature_table(use_understat=True)` to enable). Kept as a reproducible experiment.
 
 ## Requirements
 

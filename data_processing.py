@@ -35,6 +35,10 @@ logger = logging.getLogger(__name__)
 POSITION_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD", 5: "MNG"}
 PLAYER_POSITIONS = (1, 2, 3, 4)  # exclude managers (5)
 
+# Understat-derived signal NOT already in the FPL data: non-penalty xG (strips
+# penalty noise), shot volume, chance creation, and possession-value chains.
+_UNDERSTAT_STATS = ["npxG", "shots", "key_passes", "xGChain"]
+
 # Per-appearance stats we turn into lagged/rolling "form" features.
 _FORM_STATS = [
     "total_points", "minutes", "starts",
@@ -42,7 +46,7 @@ _FORM_STATS = [
     "expected_goals", "expected_assists", "expected_goal_involvements",
     "ict_index", "influence", "creativity", "threat",
     "bps", "bonus", "saves", "goals_conceded", "clean_sheets",
-]
+] + _UNDERSTAT_STATS
 
 # Rolling window lengths (in prior appearances).
 _WINDOWS = (3, 5)
@@ -88,6 +92,51 @@ def _load_player_gw(base_dir: str) -> pd.DataFrame:
     return df
 
 
+def attach_understat(raw: pd.DataFrame, base_dir: str) -> pd.DataFrame:
+    """Merge Understat per-match advanced stats onto the FPL gameweek rows.
+
+    Players are matched by the name-prefix shared between Understat filenames
+    (``First_Second_<understatId>.csv``) and FPL player folders
+    (``First_Second_<fplId>``); rows are joined on player + match date. Adds
+    npxG/shots/key_passes/xGChain where available (NaN otherwise — trees handle
+    it). These become lagged form features, so there is no leakage.
+    """
+    udir = os.path.join(base_dir, "understat")
+    if not os.path.isdir(udir) or "kickoff_time" not in raw.columns:
+        return raw
+    pref2id = {}
+    for folder in glob.glob(os.path.join(base_dir, "players", "*")):
+        parts = os.path.basename(folder).split("_")
+        if parts[-1].isdigit():
+            pref2id["_".join(parts[:-1])] = int(parts[-1])
+    frames = []
+    for f in glob.glob(os.path.join(udir, "*.csv")):
+        pid = pref2id.get("_".join(os.path.basename(f)[:-4].split("_")[:-1]))
+        if pid is None:
+            continue
+        try:
+            d = pd.read_csv(f)
+        except Exception:
+            continue
+        cols = [c for c in _UNDERSTAT_STATS if c in d.columns]
+        if "date" not in d.columns or not cols:
+            continue
+        d = d[["date"] + cols].copy()
+        d["player_id"] = pid
+        d["mdate"] = d["date"].astype(str).str[:10]
+        frames.append(d.drop(columns=["date"]))
+    if not frames:
+        return raw
+    us = pd.concat(frames, ignore_index=True).groupby(["player_id", "mdate"], as_index=False).sum(numeric_only=True)
+    raw = raw.copy()
+    raw["mdate"] = raw["kickoff_time"].astype(str).str[:10]
+    matched = raw["player_id"].isin(us["player_id"].unique()).sum()
+    raw = raw.merge(us, on=["player_id", "mdate"], how="left").drop(columns=["mdate"])
+    logger.info("Understat: joined %d advanced-stat cols (%d/%d rows have a match).",
+                len(_UNDERSTAT_STATS), int(raw[_UNDERSTAT_STATS[0]].notna().sum()), len(raw))
+    return raw
+
+
 def _aggregate_to_player_round(df: pd.DataFrame) -> pd.DataFrame:
     """Collapse to one row per (player_id, round).
 
@@ -106,7 +155,7 @@ def _aggregate_to_player_round(df: pd.DataFrame) -> pd.DataFrame:
         "expected_goals_conceded", "ict_index", "influence", "creativity",
         "threat", "bps", "bonus", "saves", "goals_conceded", "starts",
         "own_goals", "yellow_cards", "red_cards", "penalties_missed",
-    ]
+    ] + _UNDERSTAT_STATS
     sum_cols = [c for c in sum_cols if c in df.columns]
 
     spec = {c: "sum" for c in sum_cols}
@@ -172,14 +221,21 @@ def _add_form_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_feature_table(base_dir: str = "data") -> pd.DataFrame:
+def build_feature_table(base_dir: str = "data", use_understat: bool = False) -> pd.DataFrame:
     """Build the leakage-free (player, round) feature table.
 
     Returns a DataFrame ready for walk-forward training/evaluation.
+
+    `use_understat` is off by default: measured head-to-head it was within noise
+    (FPL data already carries Opta xG), so it isn't worth the extra features/build
+    time. See compare_understat.py. Flip it on to experiment.
     """
     raw = _load_player_gw(base_dir)
     pr = _read_players_raw(base_dir)
     teams = _read_teams(base_dir)
+
+    if use_understat and not raw.empty:
+        raw = attach_understat(raw, base_dir)
 
     if raw.empty:  # no matches played yet (new-season opener) -> empty table
         logger.info("No played gameweeks yet; returning an empty feature table.")
@@ -404,6 +460,7 @@ def build_upcoming_features(
     target_round: Optional[int] = None,
     prior_profiles: Optional[pd.DataFrame] = None,
     cold_start_k0: float = 3.0,
+    use_understat: bool = False,
 ) -> pd.DataFrame:
     """Build feature rows for a NOT-YET-PLAYED gameweek (a genuine forecast).
 
@@ -419,6 +476,9 @@ def build_upcoming_features(
     pr = _read_players_raw(base_dir)
     teams = _read_teams(base_dir)
     fixtures = pd.read_csv(os.path.join(base_dir, "fixtures.csv"))
+
+    if use_understat and not raw.empty:
+        raw = attach_understat(raw, base_dir)
 
     pr_round = _aggregate_to_player_round(raw)
     if target_round is None:
