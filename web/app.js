@@ -16,13 +16,27 @@ async function init() {
   } catch (e) { $("#app").innerHTML = '<div class="loading">Could not reach the model server.<br>Run <code>python serve.py</code> and reload.</div>'; return; }
   DATA.players.forEach(p => byId[p.id] = p);
   squad = DATA.squad;
-  renderHeader(); renderMetrics();
+  renderBanner(); renderHeader(); renderMetrics();
   $("#app").replaceWith($("#mainTpl").content.cloneNode(true));
   $("#gwk").textContent = DATA.meta.gw ?? "–";
   buildTeamSelect(); buildThead(); wire();
   renderSquad(); renderTable(); drawScatter();
 }
 
+function renderBanner() {
+  const m = DATA.meta, el = document.getElementById("banner");
+  if (!el) return;
+  const demo = /demo|archive/i.test(m.season);
+  el.style.display = "flex";
+  if (demo) {
+    el.className = "banner demo";
+    el.innerHTML = `⚠️ <span>Showing <b>GW${m.gw}</b> of <b>${m.season}</b> — this is bundled demo data, not the live season. ` +
+      `For the current season run <code>python data_ingestion.py</code> then restart with <code>FPL_REFRESH=1</code>.</span>`;
+  } else {
+    el.className = "banner live";
+    el.innerHTML = `✅ <span>Live forecast for <b>GW${m.gw}</b> · ${m.season} · generated ${m.generatedAt}</span>`;
+  }
+}
 function renderHeader() {
   const m = DATA.meta;
   const modeLabel = m.mode === "opener" ? "SEASON OPENER" : "MID-SEASON";

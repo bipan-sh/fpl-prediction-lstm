@@ -28,6 +28,12 @@ body{
 }
 .mono{font-family:var(--mono)}
 .wrap{max-width:1280px;margin:0 auto;padding:0 22px}
+.banner{max-width:1280px;margin:14px auto 0;padding:11px 16px;border-radius:11px;font-size:.84rem;
+  display:flex;gap:10px;align-items:center;border:1px solid;line-height:1.4}
+.banner.demo{background:rgba(233,209,0,.08);border-color:rgba(233,209,0,.35);color:#ffe680}
+.banner.live{background:rgba(0,255,135,.08);border-color:rgba(0,255,135,.35);color:#9affd0}
+.banner b{font-family:var(--mono)}
+.banner code{background:rgba(255,255,255,.08);padding:1px 6px;border-radius:5px;font-family:var(--mono);font-size:.78rem}
 
 /* ---------- header ---------- */
 header{
@@ -190,6 +196,8 @@ footer b{color:var(--muted)}
     <div class="hstats" id="hstats"></div>
   </div>
 </header>
+
+<div id="banner" class="banner" style="display:none"></div>
 
 <div class="wrap">
   <div class="hero">

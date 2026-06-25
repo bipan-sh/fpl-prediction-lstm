@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import os
 import json
+import glob
 import logging
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
 
+import joblib
 import pandas as pd
 
 from data_processing import (
@@ -34,9 +36,23 @@ logger = logging.getLogger(__name__)
 
 DATA_DIR = os.environ.get("FPL_DATA_DIR", "data")
 WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+CACHE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".cache", "precompute.joblib")
 MIN_TRAIN_ROUNDS = 8
 
 STATE: dict = {}  # cached pipeline output
+
+
+def _fingerprint() -> dict:
+    """Cheap signature of the input data so the cache auto-invalidates on refresh."""
+    def mtime(p):
+        return os.path.getmtime(p) if os.path.exists(p) else 0
+    return {
+        "dir": os.path.abspath(DATA_DIR),
+        "prior": os.environ.get("FPL_PRIOR_SEASON_DIR", ""),
+        "n_gw": len(glob.glob(os.path.join(DATA_DIR, "players", "*", "gw.csv"))),
+        "fixtures": mtime(os.path.join(DATA_DIR, "fixtures.csv")),
+        "players_raw": mtime(os.path.join(DATA_DIR, "players_raw.csv")),
+    }
 
 
 def _quick_metric(table, feats) -> dict | None:
@@ -54,7 +70,21 @@ def _quick_metric(table, feats) -> dict | None:
 
 
 def precompute() -> None:
-    logger.info("Running pipeline (this takes ~30-60s)...")
+    # Instant startup: reuse the last run unless the data changed or a refresh is forced.
+    fp = _fingerprint()
+    if os.environ.get("FPL_REFRESH") != "1" and os.path.exists(CACHE_FILE):
+        try:
+            cached = joblib.load(CACHE_FILE)
+            if cached.get("_fp") == fp:
+                STATE.update(cached)
+                logger.info("Loaded cached precompute (FPL_REFRESH=1 to rebuild). GW%s, %d players.",
+                            STATE["meta"]["gw"], STATE["meta"]["nPlayers"])
+                return
+            logger.info("Cache stale (data changed) — recomputing.")
+        except Exception as exc:
+            logger.warning("Could not read cache (%s) — recomputing.", exc)
+
+    logger.info("Running pipeline (this takes ~30-60s; cached afterwards)...")
     teams = pd.read_csv(os.path.join(DATA_DIR, "teams.csv"))
     team_name = dict(zip(teams["id"], teams["name"]))
     team_short = dict(zip(teams["id"], teams["short_name"]))
@@ -117,6 +147,13 @@ def precompute() -> None:
         "teams": {int(k): v for k, v in team_name.items()},
     })
     STATE["squad"] = _solve()
+    STATE["_fp"] = fp
+    try:
+        os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
+        joblib.dump(dict(STATE), CACHE_FILE)
+        logger.info("Cached precompute to %s", CACHE_FILE)
+    except Exception as exc:
+        logger.warning("Could not write cache: %s", exc)
     logger.info("Ready: GW%s, %d players, mode=%s.", gw, len(players), mode)
 
 
