@@ -39,6 +39,9 @@ class SquadSolution:
     total_cost: float
     xi_expected_points: float    # starting XI + captain bonus
     status: str
+    transfers_in: list = None    # player_ids brought in vs current squad (planning mode)
+    transfers_out: list = None   # player_ids removed vs current squad
+    hits: int = 0                # paid (-4) transfers taken
 
 
 def optimize_squad(
@@ -47,6 +50,9 @@ def optimize_squad(
     pred_col: str = "pred",
     force_in: list | None = None,
     exclude: list | None = None,
+    current_ids: list | None = None,
+    max_transfers: int | None = None,
+    free_transfers: int = 1,
 ) -> SquadSolution:
     """Select the optimal 15-man squad, XI and captain.
 
@@ -68,14 +74,20 @@ def optimize_squad(
     pred = df[pred_col].to_numpy(dtype=float)
     teams = df["team"].to_numpy()
 
-    # Decision vars: squad[0:n], xi[n:2n], captain[2n:3n]  (all binary)
-    N = 3 * n
-    SQ, XI, CAP = 0, n, 2 * n
+    # Decision vars: squad[0:n], xi[n:2n], captain[2n:3n], (+ hits when planning transfers)
+    plan = current_ids is not None
+    N = 3 * n + (1 if plan else 0)
+    SQ, XI, CAP, HITS = 0, n, 2 * n, 3 * n
+    ids = df["player_id"].to_numpy()
+    not_current = [i for i in range(n) if ids[i] not in set(current_ids or [])]
 
-    # Objective: maximize XI points + captain bonus -> minimize the negative.
+    # Objective: maximize XI points + captain bonus, minus 4 per points-hit (transfers
+    # beyond the free ones). milp minimises, so negate the points and add +4 per hit.
     c = np.zeros(N)
     c[XI:XI + n] = -pred
     c[CAP:CAP + n] = -pred
+    if plan:
+        c[HITS] = 4.0
 
     rows, lbs, ubs = [], [], []
 
@@ -119,12 +131,22 @@ def optimize_squad(
     for i in range(n):  # captain_i <= xi_i
         add({CAP + i: 1, XI + i: -1}, -np.inf, 0)
 
+    # Transfer planning: limit changes from the current squad and count point-hits.
+    if plan:
+        if max_transfers is not None:  # at most this many players swapped in
+            add({SQ + i: 1 for i in not_current}, 0, max_transfers)
+        # hits >= (transfers in) - free_transfers, hits >= 0
+        add({**{SQ + i: 1 for i in not_current}, HITS: -1}, -np.inf, free_transfers)
+
+    ub = np.ones(N)
+    if plan:
+        ub[HITS] = 15  # at most 15 paid transfers
     A = np.array(rows)
     constraints = LinearConstraint(A, np.array(lbs), np.array(ubs))
     res = milp(
         c,
         integrality=np.ones(N),
-        bounds=Bounds(np.zeros(N), np.ones(N)),
+        bounds=Bounds(np.zeros(N), ub),
         constraints=constraints,
     )
     if not res.success:
@@ -139,11 +161,18 @@ def optimize_squad(
 
     xi_points = float((sol.loc[sol["in_xi"], pred_col]).sum()
                       + sol.loc[sol["is_captain"], pred_col].sum())
+    t_in, t_out, hits = None, None, 0
+    if plan:
+        new_ids = set(sol["player_id"].astype(int))
+        cur = set(int(i) for i in current_ids)
+        t_in, t_out = sorted(new_ids - cur), sorted(cur - new_ids)
+        hits = int(round(res.x[HITS]))
     return SquadSolution(
         squad=sol,
         total_cost=float(sol["price"].sum()),
         xi_expected_points=xi_points,
         status=res.message,
+        transfers_in=t_in, transfers_out=t_out, hits=hits,
     )
 
 
