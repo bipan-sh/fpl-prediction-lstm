@@ -121,6 +121,21 @@ def test_availability_multiplier():
     print(f"  [ok] availability: range [{a.min():.2f}, {a.max():.2f}], {(a < 1).sum()} flagged")
 
 
+def test_train_serve_seeding_consistency():
+    # The cold-start fix: when prior_profiles is given, the TRAINING table must be
+    # seeded too (a player's first appearance, games_played==0, gets non-NaN seeded
+    # form) — matching the forecast transform. Without profiles it stays NaN.
+    profiles = build_prior_profiles("data")
+    raw = build_feature_table("data")
+    seeded = build_feature_table("data", prior_profiles=profiles)
+    first_raw = raw.sort_values("round").groupby("player_id").head(1)
+    first_seeded = seeded.sort_values("round").groupby("player_id").head(1)
+    assert first_raw["last_points"].isna().all(), "unseeded train: first game should be NaN"
+    cov = first_seeded["last_points"].notna().mean()
+    assert cov > 0.9, f"seeded train: first-game form should be filled, got {cov:.2f}"
+    print(f"  [ok] train/serve seeding consistent: first-game form NaN→seeded ({cov*100:.0f}%)")
+
+
 def test_next_unfinished_round():
     # The forecast target is the next unfinished GW from fixtures. The bundled
     # 2024-25 archive has match data through round 26, so the next GW is 27.
@@ -136,6 +151,7 @@ if __name__ == "__main__":
         test_optimizer_returns_legal_squad,
         test_cold_start_seeds_gw1,
         test_availability_multiplier,
+        test_train_serve_seeding_consistency,
         test_next_unfinished_round,
     ]
     failed = 0

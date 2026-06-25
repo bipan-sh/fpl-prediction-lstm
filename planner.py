@@ -32,7 +32,7 @@ def horizon_projections(model, base_dir: str = "data", start_round: int | None =
     if start_round is None:
         start_round = next_unfinished_round(base_dir) or 1
     rounds = [r for r in range(start_round, start_round + horizon) if r <= fixtures_max]
-    base, gw_cols = None, []
+    gw_cols, gw_frames, meta = [], [], None
     for r in rounds:
         up = build_upcoming_features(base_dir, target_round=r, prior_profiles=profiles)
         if up.empty:
@@ -41,13 +41,19 @@ def horizon_projections(model, base_dir: str = "data", start_round: int | None =
         # predict BEFORE renaming (the model reads the 'element_type' column)
         up[col] = np.clip(model.predict(up) * up["availability"], 0, None).round(2)
         up = up.rename(columns={"element_type": "pos"})
+        up["price"] = up["value"] / 10.0
         gw_cols.append(col)
-        slim = up[["player_id", "name", "pos", "team", "value", col]].copy()
-        slim["price"] = slim["value"] / 10.0
-        slim = slim.drop(columns=["value"])
-        base = slim if base is None else base.merge(slim[["player_id", col]], on="player_id", how="outer")
-    if base is None:
+        gw_frames.append(up[["player_id", col]])
+        # accumulate static metadata across ALL rounds so a player whose first
+        # projected GW is a blank still keeps name/pos/team/price (OPT-1).
+        m = up[["player_id", "name", "pos", "team", "price"]]
+        meta = m if meta is None else pd.concat([meta, m]).drop_duplicates("player_id")
+    if not gw_frames:
         raise ValueError("No upcoming fixtures to project.")
+    preds = gw_frames[0]
+    for f in gw_frames[1:]:
+        preds = preds.merge(f, on="player_id", how="outer")
+    base = meta.merge(preds, on="player_id", how="right")
     base[gw_cols] = base[gw_cols].fillna(0.0)
     base["horizon"] = base[gw_cols].sum(axis=1).round(2)
     logger.info("Projected %d players over GWs %s", len(base), rounds)
@@ -59,14 +65,22 @@ def suggest_transfers(proj: pd.DataFrame, current_ids: list, max_transfers: int 
     """Best transfers from `current_ids` for the projected horizon (vs holding)."""
     cols = ["player_id", "name", "pos", "team", "price", "horizon"]
     p = proj[cols].copy()
-    budget = float(p[p["player_id"].isin(current_ids)]["price"].sum()) + bank
+    pool = set(p["player_id"])
+    # Current players with no fixture in the horizon aren't selectable -> they are
+    # forced sells; don't let that crash the 'keep' baseline (OPT-2).
+    present = [int(i) for i in current_ids if i in pool]
+    forced = 15 - len(present)
+    # Players not in the pool are forced sells; we don't have their price here, so
+    # credit their sale value at the pool mean so the replacement is affordable.
+    budget = float(p[p["player_id"].isin(present)]["price"].sum()) \
+        + forced * float(p["price"].mean()) + bank
 
-    keep = optimize_squad(p, budget=budget, pred_col="horizon",
-                          current_ids=current_ids, max_transfers=0, free_transfers=free_transfers)
-    best = optimize_squad(p, budget=budget, pred_col="horizon",
-                          current_ids=current_ids, max_transfers=max_transfers, free_transfers=free_transfers)
+    keep = optimize_squad(p, budget=budget, pred_col="horizon", current_ids=present,
+                          max_transfers=forced, free_transfers=free_transfers)
+    best = optimize_squad(p, budget=budget, pred_col="horizon", current_ids=present,
+                          max_transfers=forced + max_transfers, free_transfers=free_transfers)
     nm = dict(zip(p["player_id"], p["name"]))
-    net = best.xi_expected_points - keep.xi_expected_points - 4 * best.hits
+    net = (best.xi_expected_points - 4 * best.hits) - (keep.xi_expected_points - 4 * keep.hits)
     return {
         "keep_points": round(keep.xi_expected_points, 1),
         "best_points": round(best.xi_expected_points, 1),

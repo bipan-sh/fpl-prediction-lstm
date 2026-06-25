@@ -66,11 +66,15 @@ def main() -> None:
         logger.info("FPL_INGEST=1 -> pulling current-season data from the FPL API...")
         ingest_data(DATA_DIR)
 
-    table = build_feature_table(DATA_DIR)
-    feats = feature_columns(table)
-    played_rounds = sorted(table["round"].unique())
     forecast_round = next_unfinished_round(DATA_DIR)
     prior_dir = os.environ.get("FPL_PRIOR_SEASON_DIR")
+    # Cold-start profiles (if any) must seed BOTH the training table and the forecast,
+    # or the model sees a different feature definition at train vs forecast time.
+    profiles = build_prior_profiles(prior_dir, DATA_DIR) if prior_dir else None
+
+    table = build_feature_table(DATA_DIR, prior_profiles=profiles)
+    feats = feature_columns(table)
+    played_rounds = sorted(table["round"].unique())
     logger.info("Engine: %s | %d features | %d played rounds | next unfinished GW: %s",
                 engine_name(), len(feats), len(played_rounds), forecast_round)
 
@@ -86,7 +90,6 @@ def main() -> None:
         logger.info("Training final model on all data; FORECASTING round %d (no actuals)...",
                     forecast_round)
         model = FPLPointsModel().fit(table, feats)
-        profiles = build_prior_profiles(prior_dir, DATA_DIR) if prior_dir else None
     else:
         # ---- New-season opener: no within-season history to learn/validate on ----
         logger.info("SEASON-OPENER mode: only %d played round(s) — skipping walk-forward "
@@ -95,11 +98,10 @@ def main() -> None:
             logger.error("Opener needs last season's data to train + seed. Re-run with "
                          "FPL_PRIOR_SEASON_DIR=<last-season-dir>. Aborting.")
             return
-        logger.info("Training on prior season (%s) and seeding GW%d via cold-start.",
+        logger.info("Training on prior season (%s, seeded) and forecasting GW%d via cold-start.",
                     prior_dir, forecast_round)
-        prior_table = build_feature_table(prior_dir)
+        prior_table = build_feature_table(prior_dir, prior_profiles=profiles)
         model = FPLPointsModel().fit(prior_table, feature_columns(prior_table))
-        profiles = build_prior_profiles(prior_dir, DATA_DIR)
 
     # ---- Forecast the next unplayed gameweek + optimize the squad ----
     upcoming = build_upcoming_features(DATA_DIR, target_round=forecast_round, prior_profiles=profiles)

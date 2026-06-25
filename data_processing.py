@@ -35,6 +35,19 @@ logger = logging.getLogger(__name__)
 POSITION_MAP = {1: "GK", 2: "DEF", 3: "MID", 4: "FWD", 5: "MNG"}
 PLAYER_POSITIONS = (1, 2, 3, 4)  # exclude managers (5)
 
+# Set-piece duty (static, from players_raw). Penalty/free-kick/corner takers score
+# materially more; order 1 = primary taker, so we use 1/order (not a taker -> 0).
+_SETPIECE_COLS = ["penalties_order", "direct_freekicks_order",
+                  "corners_and_indirect_freekicks_order"]
+_SETPIECE_FEATURES = ["pen_taker", "fk_taker", "corner_taker"]
+
+
+def _setpiece_features(df: pd.DataFrame) -> pd.DataFrame:
+    for out, col in zip(_SETPIECE_FEATURES, _SETPIECE_COLS):
+        df[out] = (1.0 / df[col]).replace([np.inf, -np.inf], np.nan).fillna(0.0) \
+            if col in df.columns else 0.0
+    return df
+
 # Understat-derived signal NOT already in the FPL data: non-penalty xG (strips
 # penalty noise), shot volume, chance creation, and possession-value chains.
 _UNDERSTAT_STATS = ["npxG", "shots", "key_passes", "xGChain"]
@@ -182,18 +195,25 @@ def _aggregate_to_player_round(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _attach_opponent_strength(df: pd.DataFrame, teams: Optional[pd.DataFrame]) -> pd.DataFrame:
-    """Add opponent strength features (known before kickoff -> not leakage)."""
+    """Add opponent strength features (known before kickoff -> not leakage).
+
+    Venue-aware: when the player's team is at home the opponent plays away, so we
+    use the opponent's AWAY strength (and vice-versa) instead of a venue-blind
+    home/away average.
+    """
     if teams is None or "opponent_team" not in df.columns:
         for c in ["opp_strength", "opp_strength_attack", "opp_strength_defence"]:
             df[c] = np.nan
         return df
-    t = teams.copy()
-    t["opp_strength"] = t[["strength_overall_home", "strength_overall_away"]].mean(axis=1)
-    t["opp_strength_attack"] = t[["strength_attack_home", "strength_attack_away"]].mean(axis=1)
-    t["opp_strength_defence"] = t[["strength_defence_home", "strength_defence_away"]].mean(axis=1)
-    cols = ["id", "opp_strength", "opp_strength_attack", "opp_strength_defence"]
-    df = df.merge(t[cols], left_on="opponent_team", right_on="id", how="left")
-    return df.drop(columns=["id"])
+    s_cols = ["strength_overall_home", "strength_overall_away", "strength_attack_home",
+              "strength_attack_away", "strength_defence_home", "strength_defence_away"]
+    df = df.merge(teams[["id"] + s_cols], left_on="opponent_team", right_on="id", how="left")
+    home = (df["was_home"].fillna(0) >= 0.5).to_numpy() if "was_home" in df.columns else np.zeros(len(df), bool)
+    for out, hm, aw in [("opp_strength", "strength_overall_home", "strength_overall_away"),
+                        ("opp_strength_attack", "strength_attack_home", "strength_attack_away"),
+                        ("opp_strength_defence", "strength_defence_home", "strength_defence_away")]:
+        df[out] = np.where(home, df[aw], df[hm])  # we home -> opponent away strength
+    return df.drop(columns=["id"] + s_cols)
 
 
 def _add_form_features(df: pd.DataFrame) -> pd.DataFrame:
@@ -221,7 +241,9 @@ def _add_form_features(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def build_feature_table(base_dir: str = "data", use_understat: bool = False) -> pd.DataFrame:
+def build_feature_table(base_dir: str = "data", use_understat: bool = False,
+                        prior_profiles: Optional[pd.DataFrame] = None,
+                        cold_start_k0: float = 3.0) -> pd.DataFrame:
     """Build the leakage-free (player, round) feature table.
 
     Returns a DataFrame ready for walk-forward training/evaluation.
@@ -229,6 +251,12 @@ def build_feature_table(base_dir: str = "data", use_understat: bool = False) -> 
     `use_understat` is off by default: measured head-to-head it was within noise
     (FPL data already carries Opta xG), so it isn't worth the extra features/build
     time. See compare_understat.py. Flip it on to experiment.
+
+    `prior_profiles`: when forecasting with cold-start seeding, the TRAINING table
+    must be seeded with the same shrinkage (per row, using games-played-so-far) or
+    the model sees a different feature definition at train vs forecast time. Pass the
+    same profiles here that you pass to build_upcoming_features. Mid-season callers
+    leave it None (no seeding on either path -> still consistent).
     """
     raw = _load_player_gw(base_dir)
     pr = _read_players_raw(base_dir)
@@ -247,9 +275,9 @@ def build_feature_table(base_dir: str = "data", use_understat: bool = False) -> 
     raw = _attach_opponent_strength(raw, teams)
     pr_round = _aggregate_to_player_round(raw)
 
-    # Attach static attributes (position, club, name) from players_raw.
+    # Attach static attributes (position, club, name, set-piece duty) from players_raw.
     if pr is not None:
-        meta_cols = ["id", "element_type", "team", "first_name", "second_name"]
+        meta_cols = ["id", "element_type", "team", "first_name", "second_name"] + _SETPIECE_COLS
         meta = pr[[c for c in meta_cols if c in pr.columns]].copy()
         pr_round = pr_round.merge(meta, left_on="player_id", right_on="id", how="left")
         pr_round = pr_round.drop(columns=["id"])
@@ -260,11 +288,17 @@ def build_feature_table(base_dir: str = "data", use_understat: bool = False) -> 
         pr_round["element_type"] = np.nan
         pr_round["team"] = np.nan
         pr_round["name"] = "player_" + pr_round["player_id"].astype(str)
+    pr_round = _setpiece_features(pr_round)
 
     # Drop managers and rows with no position.
     pr_round = pr_round[pr_round["element_type"].isin(PLAYER_POSITIONS)].copy()
 
     pr_round = _add_form_features(pr_round)
+
+    # Cold-start seeding at TRAINING time, applied per row with that row's
+    # games-played-so-far (so it matches the forecast-time transform exactly).
+    if prior_profiles is not None:
+        pr_round = seed_cold_start(pr_round, prior_profiles, k0=cold_start_k0)
 
     # Targets.
     pr_round["target_points"] = pr_round["total_points"]
@@ -287,34 +321,32 @@ def _upcoming_fixture_context(
     (mean), and opponent strength averaged across that round's fixture(s).
     """
     fx = fixtures[fixtures["event"] == target_round]
-    strength = None
-    if teams is not None:
-        t = teams.copy()
-        t["s_all"] = t[["strength_overall_home", "strength_overall_away"]].mean(axis=1)
-        t["s_att"] = t[["strength_attack_home", "strength_attack_away"]].mean(axis=1)
-        t["s_def"] = t[["strength_defence_home", "strength_defence_away"]].mean(axis=1)
-        strength = t.set_index("id")[["s_all", "s_att", "s_def"]].to_dict("index")
+    strength = teams.set_index("id") if teams is not None else None
+
+    def opp_strength(opp_id, is_home, kind):
+        # we home -> opponent plays away -> use opponent's away strength
+        if strength is None or opp_id not in strength.index:
+            return np.nan
+        venue = "away" if is_home else "home"
+        return float(strength.loc[opp_id, f"strength_{kind}_{venue}"])
 
     rows: dict[int, dict] = {}
     for _, f in fx.iterrows():
         for team, opp, is_home in ((f["team_h"], f["team_a"], 1), (f["team_a"], f["team_h"], 0)):
-            r = rows.setdefault(int(team), {"home": [], "opps": []})
+            r = rows.setdefault(int(team), {"home": [], "all": [], "att": [], "deff": []})
             r["home"].append(is_home)
-            r["opps"].append(int(opp))
+            r["all"].append(opp_strength(int(opp), is_home, "overall"))
+            r["att"].append(opp_strength(int(opp), is_home, "attack"))
+            r["deff"].append(opp_strength(int(opp), is_home, "defence"))
 
     out = []
     for team, r in rows.items():
-        opp_all = opp_att = opp_def = np.nan
-        if strength is not None:
-            vals = [strength.get(o, {}) for o in r["opps"]]
-            opp_all = np.nanmean([v.get("s_all", np.nan) for v in vals]) if vals else np.nan
-            opp_att = np.nanmean([v.get("s_att", np.nan) for v in vals]) if vals else np.nan
-            opp_def = np.nanmean([v.get("s_def", np.nan) for v in vals]) if vals else np.nan
         out.append({
             "team": team, "n_fixtures": len(r["home"]),
             "was_home": float(np.mean(r["home"])),
-            "opp_strength": opp_all, "opp_strength_attack": opp_att,
-            "opp_strength_defence": opp_def,
+            "opp_strength": np.nanmean(r["all"]) if r["all"] else np.nan,
+            "opp_strength_attack": np.nanmean(r["att"]) if r["att"] else np.nan,
+            "opp_strength_defence": np.nanmean(r["deff"]) if r["deff"] else np.nan,
         })
     return pd.DataFrame(out)
 
@@ -329,7 +361,10 @@ def next_unfinished_round(base_dir: str = "data") -> Optional[int]:
     fx = pd.read_csv(os.path.join(base_dir, "fixtures.csv"))
     if "finished" not in fx.columns or "event" not in fx.columns:
         return None
-    pending = fx[(~fx["finished"].astype(bool)) & fx["event"].notna()]
+    # NaN 'finished' (unconfirmed) must count as NOT finished, else NaN.astype(bool)
+    # is True and an upcoming round gets skipped.
+    finished = fx["finished"].fillna(False).astype(bool)
+    pending = fx[(~finished) & fx["event"].notna()]
     return int(pending["event"].min()) if not pending.empty else None
 
 
@@ -508,6 +543,7 @@ def build_upcoming_features(
     for c in ("status", "chance_of_playing_next_round"):  # availability signals (live)
         if c in pr.columns:
             meta_cols.append(c)
+    meta_cols += [c for c in _SETPIECE_COLS if c in pr.columns]
     meta = pr[meta_cols].copy()
     meta["name"] = (meta["first_name"].fillna("") + " " + meta["second_name"].fillna("")).str.strip()
     # Current price (*10), known before kickoff. NB: for a live next-GW forecast this is
@@ -519,6 +555,7 @@ def build_upcoming_features(
     feat = feat.merge(meta, left_on="player_id", right_on="id", how="right").drop(columns=["id"])
     feat = feat[feat["element_type"].isin(PLAYER_POSITIONS)].copy()
     feat["games_played"] = feat["games_played"].fillna(0)
+    feat = _setpiece_features(feat)
 
     # Ensure every form/lag column exists even with little/no history, so the
     # cold-start seeding (below) and the model see a consistent schema.
@@ -562,6 +599,7 @@ def feature_columns(df: pd.DataFrame) -> list[str]:
     # Pre-match context (legitimately known in advance).
     cols += ["was_home", "n_fixtures", "value", "element_type",
              "opp_strength", "opp_strength_attack", "opp_strength_defence"]
+    cols += _SETPIECE_FEATURES  # static set-piece duty
     return [c for c in cols if c in df.columns]
 
 

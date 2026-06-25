@@ -71,9 +71,14 @@ def _get_json(session: requests.Session, url: str, cache_path: Optional[str] = N
     return None
 
 
-def ingest_data(base_dir: str = "data", use_cache: bool = True,
+def ingest_data(base_dir: str = "data", use_cache: bool = False,
                 max_players: Optional[int] = None) -> None:
-    """Download current-season FPL data and write the on-disk layout."""
+    """Download current-season FPL data and write the on-disk layout.
+
+    use_cache defaults to False so each run pulls FRESH data (the FPL API updates
+    after every gameweek). Set use_cache=True only for offline/dev reuse of a
+    previously-downloaded snapshot.
+    """
     os.makedirs(base_dir, exist_ok=True)
     cache_dir = os.path.join(base_dir, "cache")
     session = _session()
@@ -105,13 +110,20 @@ def ingest_data(base_dir: str = "data", use_cache: bool = True,
     if max_players:
         ids = ids[:max_players]
 
-    failed = []
+    failed, past_rows = [], []
     for n, pid in enumerate(ids, 1):
         row = elements.loc[elements["id"] == pid].iloc[0]
         folder = f"{row['first_name']}_{row['second_name']}_{int(pid)}".replace("/", "_")
         summary = _get_json(session, f"{BASE}/element-summary/{pid}/",
                             os.path.join(cache_dir, f"element-{pid}.json"), use_cache)
-        if summary is None or not summary.get("history"):
+        if summary is None:
+            failed.append(pid)
+            continue
+        # Prior-season totals: bootstrap-static resets per-player cumulatives to 0
+        # each season, so last season's form for cold-start MUST come from here.
+        for past in summary.get("history_past", []):
+            past_rows.append({**past, "player_id": pid})
+        if not summary.get("history"):
             failed.append(pid)
             continue
         hist = pd.DataFrame(summary["history"])
@@ -124,6 +136,10 @@ def ingest_data(base_dir: str = "data", use_cache: bool = True,
             time.sleep(REQUEST_PAUSE)
         if n % 100 == 0:
             logger.info("  ...ingested %d/%d players", n, len(ids))
+
+    if past_rows:  # one row per (player, past season) with totals incl. minutes, xG, etc.
+        pd.DataFrame(past_rows).to_csv(os.path.join(base_dir, "history_past.csv"), index=False)
+        logger.info("Saved history_past.csv (%d player-season rows)", len(past_rows))
 
     logger.info("Ingestion complete. %d players written, %d failed.",
                 len(ids) - len(failed), len(failed))

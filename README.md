@@ -91,6 +91,21 @@ Open the URL in a browser. The app (`web/`) gives you:
 
 API: `GET /api/data` (predictions + default squad), `GET /api/optimize?budget=&lock=&exclude=`.
 
+## Data sources & the season opener (2026-27)
+
+- **Primary feed: the official FPL API.** It carries Opta `expected_goals`/`expected_assists`
+  in-game, so the model's xG features come from there. (Note: **FBref removed all free Opta
+  advanced stats in Jan 2026**, and Understat covers only top-5 leagues — neither is relied on.)
+- **Prior-season form for cold-start comes from `history_past`.** `bootstrap-static` resets
+  per-player totals to zero each season, so `data_ingestion.py` also writes `history_past.csv`
+  (last-season totals per player) for `build_prior_profiles` to seed GW1.
+- **World Cup / pre-season friendlies are deliberately NOT model features.** Free xG for them
+  is gone, the signal is noisy, and most participants aren't PL players. Per analyst/official
+  guidance they're useful only as a manual **minutes/role/set-piece** overlay on top of the
+  model (feed them into the availability step), never as a scoring input.
+- **Set-piece duty** (penalty/free-kick/corner takers, from `players_raw`) is included: roughly
+  redundant mid-season (form already encodes it) but valuable at the opener when form is cold.
+
 ## Backtest vs. forecast
 
 `main.py` does two distinct things, and it is important not to confuse them:

@@ -46,11 +46,14 @@ def _fingerprint() -> dict:
     """Cheap signature of the input data so the cache auto-invalidates on refresh."""
     def mtime(p):
         return os.path.getmtime(p) if os.path.exists(p) else 0
+    gw_files = glob.glob(os.path.join(DATA_DIR, "players", "*", "gw.csv"))
     return {
-        "v": 2,  # bump when the pipeline/feature set changes so the cache rebuilds
+        "v": 3,  # bump when the pipeline/feature set changes so the cache rebuilds
         "dir": os.path.abspath(DATA_DIR),
         "prior": os.environ.get("FPL_PRIOR_SEASON_DIR", ""),
-        "n_gw": len(glob.glob(os.path.join(DATA_DIR, "players", "*", "gw.csv"))),
+        "n_gw": len(gw_files),
+        # newest gameweek file: catches per-player history updates (not just count)
+        "gw_mtime": round(max((mtime(f) for f in gw_files), default=0), 1),
         "fixtures": mtime(os.path.join(DATA_DIR, "fixtures.csv")),
         "players_raw": mtime(os.path.join(DATA_DIR, "players_raw.csv")),
     }
@@ -90,25 +93,26 @@ def precompute() -> None:
     team_name = dict(zip(teams["id"], teams["name"]))
     team_short = dict(zip(teams["id"], teams["short_name"]))
 
-    table = build_feature_table(DATA_DIR)
-    feats = feature_columns(table)
-    played = sorted(table["round"].unique())
     gw = next_unfinished_round(DATA_DIR)
     prior_dir = os.environ.get("FPL_PRIOR_SEASON_DIR")
+    # Seed both training and forecast with the same profiles (else train/serve skew).
+    profiles = build_prior_profiles(prior_dir, DATA_DIR) if prior_dir else None
+
+    table = build_feature_table(DATA_DIR, prior_profiles=profiles)
+    feats = feature_columns(table)
+    played = sorted(table["round"].unique())
     opener = len(played) < MIN_TRAIN_ROUNDS + 2
 
     if not opener:
         metric = _quick_metric(table, feats)
         model = FPLPointsModel().fit(table, feats)
-        profiles = build_prior_profiles(prior_dir, DATA_DIR) if prior_dir else None
         mode = "midseason"
     else:
         metric = None
         if not prior_dir:
             raise SystemExit("Season opener needs FPL_PRIOR_SEASON_DIR=<last-season-dir>.")
-        prior_table = build_feature_table(prior_dir)
+        prior_table = build_feature_table(prior_dir, prior_profiles=profiles)
         model = FPLPointsModel().fit(prior_table, feature_columns(prior_table))
-        profiles = build_prior_profiles(prior_dir, DATA_DIR)
         mode = "opener"
 
     up = build_upcoming_features(DATA_DIR, target_round=gw, prior_profiles=profiles)

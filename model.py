@@ -90,6 +90,7 @@ class FPLPointsModel:
         self.appear_models: dict[int, object] = {}
         self.points_models: dict[int, object] = {}
         self.fallback_rate: dict[int, float] = {}
+        self.fallback_pts: dict[int, float] = {}
         self.feature_cols: list[str] = []
 
     def fit(self, train: pd.DataFrame, feature_cols: list[str]) -> "FPLPointsModel":
@@ -101,6 +102,8 @@ class FPLPointsModel:
             X = sub[feature_cols]
             y_appear = sub["target_appeared"].to_numpy()
             self.fallback_rate[pos] = float(y_appear.mean())
+            ap = sub[sub["target_appeared"] == 1]
+            self.fallback_pts[pos] = float(ap["target_points"].mean()) if len(ap) else 0.0
             # Appearance classifier (needs both classes present).
             if len(np.unique(y_appear)) == 2:
                 clf = _make_classifier(self.params)
@@ -116,9 +119,12 @@ class FPLPointsModel:
 
     def _predict_pos(self, pos: int, X: pd.DataFrame) -> np.ndarray:
         reg = self.points_models.get(pos)
+        # No regressor for this position -> fall back to the mean points-when-played
+        # rather than zeroing the whole position (keeps the appearance signal).
         if reg is None:
-            return np.zeros(len(X))
-        cond = np.clip(reg.predict(X), 0, None)
+            cond = np.full(len(X), self.fallback_pts.get(pos, 0.0))
+        else:
+            cond = np.clip(reg.predict(X), 0, None)
         clf = self.appear_models.get(pos)
         if clf is not None:
             p_appear = clf.predict_proba(X)[:, 1]
@@ -127,6 +133,13 @@ class FPLPointsModel:
         return p_appear * cond
 
     def predict(self, df: pd.DataFrame) -> np.ndarray:
+        # Guard against a forecast frame missing a trained column (else a silent
+        # KeyError). Missing -> NaN, which the trees handle.
+        missing = [c for c in self.feature_cols if c not in df.columns]
+        if missing:
+            df = df.copy()
+            for c in missing:
+                df[c] = np.nan
         preds = np.zeros(len(df))
         for pos in self.positions:
             mask = (df["element_type"] == pos).to_numpy()
