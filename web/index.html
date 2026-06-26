@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GAFFER · FPL Prediction Terminal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600..800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet" />
+<style>
+:root{
+  --bg:#080510; --bg2:#0f0a1d; --panel:#140d28; --panel2:#1b1235;
+  --line:#2a1f47; --purple:#38003c; --green:#00ff87; --magenta:#e90052;
+  --cyan:#04f5ff; --ink:#efe9fb; --muted:#9385b4; --dim:#6b5d8c;
+  --gk:#04f5ff; --def:#00ff87; --mid:#e9d100; --fwd:#e90052;
+  --radius:14px; --mono:"JetBrains Mono",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{
+  font-family:"Hanken Grotesk",system-ui,sans-serif; color:var(--ink);
+  background:
+    radial-gradient(1200px 600px at 85% -10%, rgba(233,0,82,.10), transparent 60%),
+    radial-gradient(1000px 500px at 5% 0%, rgba(4,245,255,.08), transparent 55%),
+    linear-gradient(180deg,#0b0717,#080510);
+  background-attachment:fixed; min-height:100vh; line-height:1.45;
+  -webkit-font-smoothing:antialiased;
+}
+.mono{font-family:var(--mono)}
+.wrap{max-width:1280px;margin:0 auto;padding:0 22px}
+.banner{max-width:1280px;margin:14px auto 0;padding:11px 16px;border-radius:11px;font-size:.84rem;
+  display:flex;gap:10px;align-items:center;border:1px solid;line-height:1.4}
+.banner.demo{background:rgba(233,209,0,.08);border-color:rgba(233,209,0,.35);color:#ffe680}
+.banner.live{background:rgba(0,255,135,.08);border-color:rgba(0,255,135,.35);color:#9affd0}
+.banner b{font-family:var(--mono)}
+.banner code{background:rgba(255,255,255,.08);padding:1px 6px;border-radius:5px;font-family:var(--mono);font-size:.78rem}
+
+/* ---------- header ---------- */
+header{
+  position:sticky;top:0;z-index:50;
+  backdrop-filter:blur(14px);
+  background:linear-gradient(180deg, rgba(10,6,20,.92), rgba(10,6,20,.62));
+  border-bottom:1px solid var(--line);
+}
+.bar{display:flex;align-items:center;gap:18px;padding:14px 0}
+.logo{font-family:"Bricolage Grotesque";font-weight:800;font-size:1.55rem;letter-spacing:-.02em;line-height:1;display:flex;align-items:center;gap:10px}
+.logo b{color:var(--green)}
+.logo .dot{width:11px;height:11px;border-radius:50%;background:var(--green);box-shadow:0 0 14px var(--green);animation:pulse 2.4s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.tag{color:var(--muted);font-size:.74rem;letter-spacing:.18em;text-transform:uppercase;margin-left:2px}
+.hstats{margin-left:auto;display:flex;gap:10px;flex-wrap:wrap}
+.chip{
+  font-family:var(--mono);font-size:.72rem;padding:7px 11px;border-radius:9px;
+  border:1px solid var(--line);background:var(--panel);color:var(--muted);white-space:nowrap;
+}
+.chip b{color:var(--ink)}
+.chip.live b{color:var(--green)}
+
+/* ---------- hero stat strip ---------- */
+.hero{padding:30px 0 8px}
+.kicker{font-family:var(--mono);font-size:.72rem;letter-spacing:.32em;text-transform:uppercase;color:var(--magenta)}
+h1{font-family:"Bricolage Grotesque";font-weight:800;font-size:clamp(2rem,4.4vw,3.3rem);letter-spacing:-.03em;line-height:.98;margin:8px 0 4px}
+h1 em{font-style:normal;color:var(--green)}
+.sub{color:var(--muted);max-width:60ch}
+.metrics{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:24px}
+.metric{background:linear-gradient(160deg,var(--panel2),var(--panel));border:1px solid var(--line);border-radius:var(--radius);padding:16px 18px;position:relative;overflow:hidden}
+.metric::after{content:"";position:absolute;inset:0 0 auto 0;height:2px;background:linear-gradient(90deg,var(--green),transparent)}
+.metric .v{font-family:var(--mono);font-size:1.7rem;font-weight:700;letter-spacing:-.02em}
+.metric .k{color:var(--muted);font-size:.72rem;text-transform:uppercase;letter-spacing:.13em;margin-top:3px}
+.metric .note{color:var(--dim);font-size:.72rem;margin-top:6px}
+.metric.good .v{color:var(--green)}
+
+/* ---------- section scaffolding ---------- */
+section{padding:36px 0}
+.shead{display:flex;align-items:baseline;gap:14px;margin-bottom:18px}
+.shead h2{font-family:"Bricolage Grotesque";font-weight:700;font-size:1.5rem;letter-spacing:-.02em}
+.shead .num{font-family:var(--mono);color:var(--magenta);font-size:.8rem;font-weight:700}
+.shead .hint{color:var(--dim);font-size:.82rem;margin-left:auto}
+
+/* ---------- squad / pitch ---------- */
+.squad-grid{display:grid;grid-template-columns:1.35fr .9fr;gap:22px}
+.pitch-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:16px;overflow:hidden}
+.pitch{
+  position:relative;border-radius:10px;aspect-ratio:5/6;
+  background:
+    repeating-linear-gradient(180deg,#0c3b25 0 12.5%,#0a3320 12.5% 25%);
+  border:1px solid rgba(255,255,255,.10);overflow:hidden;
+}
+.pitch::before{content:"";position:absolute;inset:8px;border:2px solid rgba(255,255,255,.16);border-radius:6px}
+.pitch::after{content:"";position:absolute;left:50%;top:8px;bottom:8px;width:2px;background:rgba(255,255,255,.10);transform:translateX(-50%)}
+.center-c{position:absolute;left:50%;top:50%;width:78px;height:78px;border:2px solid rgba(255,255,255,.14);border-radius:50%;transform:translate(-50%,-50%)}
+.rows{position:absolute;inset:18px 10px;display:flex;flex-direction:column;justify-content:space-between}
+.line{display:flex;justify-content:center;gap:8px;flex-wrap:wrap}
+.pl{
+  width:74px;cursor:pointer;animation:pop .5s both;
+  display:flex;flex-direction:column;align-items:center;gap:4px;
+}
+@keyframes pop{from{opacity:0;transform:translateY(8px) scale(.9)}to{opacity:1;transform:none}}
+.jersey{
+  width:42px;height:42px;border-radius:11px;display:grid;place-items:center;
+  font-family:var(--mono);font-weight:700;font-size:.82rem;color:#04130b;
+  background:var(--green);position:relative;box-shadow:0 6px 16px rgba(0,0,0,.4);
+  border:2px solid rgba(255,255,255,.25);transition:transform .15s;
+}
+.pl:hover .jersey{transform:translateY(-3px) scale(1.06)}
+.pl[data-pos="1"] .jersey{background:var(--gk)}
+.pl[data-pos="2"] .jersey{background:var(--def)}
+.pl[data-pos="3"] .jersey{background:var(--mid);color:#1c1700}
+.pl[data-pos="4"] .jersey{background:var(--fwd);color:#fff}
+.armband{position:absolute;top:-7px;right:-7px;width:19px;height:19px;border-radius:50%;background:#fff;color:#000;font-size:.6rem;font-weight:800;display:grid;place-items:center;font-family:var(--mono);box-shadow:0 0 0 2px var(--magenta)}
+.pl .nm{font-size:.66rem;font-weight:600;text-align:center;max-width:74px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-shadow:0 1px 3px #000}
+.pl .pt{font-family:var(--mono);font-size:.64rem;color:#04130b;background:rgba(255,255,255,.82);padding:0 5px;border-radius:5px;font-weight:700}
+.form-tag{position:absolute;top:10px;left:12px;font-family:var(--mono);font-size:.66rem;color:rgba(255,255,255,.8);background:rgba(0,0,0,.35);padding:3px 8px;border-radius:6px;letter-spacing:.1em}
+
+/* bench + controls */
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+.panel h3{font-size:.78rem;text-transform:uppercase;letter-spacing:.14em;color:var(--muted);margin-bottom:12px;font-weight:600}
+.budget-val{font-family:var(--mono);font-size:2rem;font-weight:700;color:var(--green);letter-spacing:-.02em}
+.budget-val small{color:var(--muted);font-size:.95rem}
+.barwrap{height:9px;border-radius:6px;background:var(--bg2);overflow:hidden;margin:10px 0 4px;border:1px solid var(--line)}
+.barfill{height:100%;background:linear-gradient(90deg,var(--green),var(--cyan));transition:width .5s cubic-bezier(.2,.8,.2,1)}
+.brow{display:flex;justify-content:space-between;font-size:.74rem;color:var(--dim);font-family:var(--mono)}
+input[type=range]{-webkit-appearance:none;width:100%;height:4px;border-radius:4px;background:var(--line);margin:18px 0 6px;outline:none}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:20px;height:20px;border-radius:50%;background:var(--green);cursor:pointer;box-shadow:0 0 12px rgba(0,255,135,.7);border:3px solid #07120c}
+.bench{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px}
+.bp{background:var(--bg2);border:1px solid var(--line);border-radius:9px;padding:8px;text-align:center;font-size:.68rem}
+.bp .bn{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bp .bv{font-family:var(--mono);color:var(--muted);font-size:.64rem}
+.tagrow{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;min-height:10px}
+.tg{font-family:var(--mono);font-size:.68rem;padding:4px 8px;border-radius:7px;display:flex;gap:6px;align-items:center;cursor:pointer}
+.tg.lock{background:rgba(0,255,135,.12);border:1px solid rgba(0,255,135,.3);color:var(--green)}
+.tg.ban{background:rgba(233,0,82,.12);border:1px solid rgba(233,0,82,.32);color:#ff5e93}
+.tg span{opacity:.6}
+.status{font-family:var(--mono);font-size:.72rem;color:var(--cyan);min-height:16px;margin-top:10px}
+
+/* ---------- explorer ---------- */
+.filters{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:14px}
+.search{flex:1;min-width:180px;display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 12px}
+.search input{background:none;border:none;color:var(--ink);outline:none;width:100%;font-size:.9rem;font-family:inherit}
+.search svg{flex-shrink:0;opacity:.5}
+.pos-chips{display:flex;gap:6px}
+.pc{font-family:var(--mono);font-size:.74rem;padding:8px 12px;border-radius:9px;border:1px solid var(--line);background:var(--panel);color:var(--muted);cursor:pointer;transition:.15s}
+.pc.on{color:#06120b;font-weight:700}
+.pc[data-p=ALL].on{background:var(--ink);color:#120a22}
+.pc[data-p=GK].on{background:var(--gk)} .pc[data-p=DEF].on{background:var(--def)}
+.pc[data-p=MID].on{background:var(--mid)} .pc[data-p=FWD].on{background:var(--fwd);color:#fff}
+select,.toggle{font-family:var(--mono);font-size:.76rem;padding:8px 12px;border-radius:9px;border:1px solid var(--line);background:var(--panel);color:var(--muted);cursor:pointer}
+.toggle.on{color:var(--green);border-color:rgba(0,255,135,.4)}
+.tbl-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);overflow:hidden}
+.tbl-scroll{max-height:560px;overflow:auto}
+table{width:100%;border-collapse:collapse;font-size:.85rem}
+thead th{position:sticky;top:0;background:var(--panel2);text-align:left;padding:11px 12px;font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted);cursor:pointer;user-select:none;white-space:nowrap;border-bottom:1px solid var(--line)}
+thead th.num,td.num{text-align:right;font-family:var(--mono)}
+thead th:hover{color:var(--ink)}
+th .ar{color:var(--green)}
+tbody tr{border-bottom:1px solid rgba(42,31,71,.5);transition:background .12s}
+tbody tr:hover{background:var(--panel2)}
+td{padding:9px 12px;white-space:nowrap}
+.ppos{display:inline-block;width:34px;text-align:center;font-family:var(--mono);font-size:.66rem;font-weight:700;border-radius:5px;padding:2px 0}
+.ppos.GK{background:rgba(4,245,255,.16);color:var(--gk)} .ppos.DEF{background:rgba(0,255,135,.16);color:var(--def)}
+.ppos.MID{background:rgba(233,209,0,.16);color:var(--mid)} .ppos.FWD{background:rgba(233,0,82,.18);color:#ff5e93}
+.nm-cell{font-weight:600}
+.team-cell{color:var(--muted);font-family:var(--mono);font-size:.72rem}
+.pred-cell{color:var(--green);font-weight:700}
+.avail-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:5px;vertical-align:middle}
+.act{display:flex;gap:5px}
+.ib{width:24px;height:24px;border-radius:7px;border:1px solid var(--line);background:var(--bg2);color:var(--muted);cursor:pointer;font-size:.72rem;display:grid;place-items:center;font-family:var(--mono);transition:.12s}
+.ib:hover{color:var(--ink);transform:translateY(-1px)}
+.ib.lock.on{background:var(--green);color:#06120b;border-color:var(--green)}
+.ib.ban.on{background:var(--magenta);color:#fff;border-color:var(--magenta)}
+
+/* ---------- scatter ---------- */
+.scatter-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:18px}
+#scatter{width:100%;height:340px;display:block}
+.legend{display:flex;gap:16px;font-size:.74rem;color:var(--muted);margin-top:8px;font-family:var(--mono)}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px}
+
+/* planner */
+.planner-grid{display:grid;grid-template-columns:.95fr 1.3fr;gap:22px}
+.plan-controls{display:flex;gap:14px;margin-bottom:14px}
+.plan-controls label{font-size:.74rem;color:var(--muted);display:flex;flex-direction:column;gap:5px;font-family:var(--mono)}
+.xfer{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;margin-bottom:7px;font-size:.85rem;background:var(--bg2);border:1px solid var(--line)}
+.xfer .dir{font-family:var(--mono);font-weight:700;font-size:.72rem;width:30px;text-align:center;border-radius:5px;padding:2px 0}
+.xfer.in .dir{background:rgba(0,255,135,.16);color:var(--green)}
+.xfer.out .dir{background:rgba(233,0,82,.16);color:#ff5e93}
+.xfer .arrow{color:var(--dim)}
+.net{font-family:var(--mono);font-weight:700;font-size:1.05rem;margin-top:10px}
+.net.up{color:var(--green)} .net.flat{color:var(--muted)}
+.chips{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.chipcard{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:12px}
+.chipcard .ct{font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+.chipcard .cg{font-family:var(--mono);font-size:1.4rem;font-weight:700;color:var(--cyan);margin-top:3px}
+.chipcard .cv{font-size:.72rem;color:var(--dim);font-family:var(--mono)}
+td.gwcell{font-family:var(--mono);text-align:right;color:var(--muted)}
+td.hz{font-family:var(--mono);text-align:right;color:var(--green);font-weight:700}
+@media(max-width:900px){.planner-grid{grid-template-columns:1fr}}
+footer{padding:40px 0;color:var(--dim);font-size:.78rem;text-align:center;border-top:1px solid var(--line);margin-top:20px}
+footer b{color:var(--muted)}
+.loading{padding:80px 0;text-align:center;color:var(--muted);font-family:var(--mono)}
+.spin{width:34px;height:34px;border:3px solid var(--line);border-top-color:var(--green);border-radius:50%;animation:rot 1s linear infinite;margin:0 auto 16px}
+@keyframes rot{to{transform:rotate(360deg)}}
+
+@media(max-width:900px){
+  .squad-grid{grid-template-columns:1fr}
+  .metrics{grid-template-columns:repeat(2,1fr)}
+  .hstats .chip.hideable{display:none}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap bar">
+    <div class="logo"><span class="dot"></span>GAF<b>FER</b></div>
+    <span class="tag">FPL Prediction Terminal</span>
+    <div class="hstats" id="hstats"></div>
+  </div>
+</header>
+
+<div id="banner" class="banner" style="display:none"></div>
+
+<div class="wrap">
+  <div class="hero">
+    <div class="kicker">Gameweek <span id="gwk">–</span> · expected points model</div>
+    <h1>Pick the team the <em>numbers</em> would pick.</h1>
+    <p class="sub">A position-specific gradient-boosted model forecasts every player's points for the next gameweek; an integer-programming optimiser builds the best legal squad. Lock players, set a budget — the XI re-solves live.</p>
+    <div class="metrics" id="metrics"></div>
+  </div>
+</div>
+
+<div id="app" class="loading"><div class="spin"></div>Running the model…</div>
+
+<template id="mainTpl">
+<div class="wrap">
+  <section>
+    <div class="shead"><span class="num">01</span><h2>Optimal XI</h2><span class="hint">Tap a shirt to exclude · drag the budget</span></div>
+    <div class="squad-grid">
+      <div class="pitch-card">
+        <div class="pitch">
+          <div class="center-c"></div>
+          <div class="form-tag" id="formTag">—</div>
+          <div class="rows" id="pitch"></div>
+        </div>
+      </div>
+      <div>
+        <div class="panel">
+          <h3>Budget &amp; constraints</h3>
+          <div class="budget-val" id="budgetVal">£100.0<small>m</small></div>
+          <div class="barwrap"><div class="barfill" id="costBar"></div></div>
+          <div class="brow"><span>spent <b id="spent">–</b></span><span>XI xPts <b id="xipts" style="color:var(--green)">–</b></span></div>
+          <input type="range" id="budget" min="80" max="100" step="0.5" value="100" />
+          <div class="brow"><span>£80m</span><span>£100m</span></div>
+          <div class="tagrow" id="lockTags"></div>
+          <div class="tagrow" id="banTags"></div>
+          <div class="status" id="status"></div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h3>Bench</h3>
+          <div class="bench" id="bench"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="shead"><span class="num">02</span><h2>Player Explorer</h2><span class="hint" id="cnt"></span></div>
+    <div class="filters">
+      <label class="search"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg><input id="q" placeholder="Search players…" /></label>
+      <div class="pos-chips" id="posChips">
+        <div class="pc on" data-p="ALL">ALL</div><div class="pc" data-p="GK">GK</div>
+        <div class="pc" data-p="DEF">DEF</div><div class="pc" data-p="MID">MID</div><div class="pc" data-p="FWD">FWD</div>
+      </div>
+      <select id="teamSel"><option value="">All teams</option></select>
+      <div class="toggle" id="availTog">Available only</div>
+    </div>
+    <div class="tbl-card"><div class="tbl-scroll">
+      <table>
+        <thead><tr id="thead"></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div></div>
+  </section>
+
+  <section>
+    <div class="shead"><span class="num">03</span><h2>Value Map</h2><span class="hint">price vs predicted points — top-left = best value</span></div>
+    <div class="scatter-card">
+      <canvas id="scatter"></canvas>
+      <div class="legend"><span><i style="background:var(--gk)"></i>GK</span><span><i style="background:var(--def)"></i>DEF</span><span><i style="background:var(--mid)"></i>MID</span><span><i style="background:var(--fwd)"></i>FWD</span><span style="margin-left:auto">● = in optimal squad</span></div>
+    </div>
+  </section>
+
+  <section id="plannerSection">
+    <div class="shead"><span class="num">04</span><h2>Multi-GW Planner</h2><span class="hint" id="planHint">projected points over the next gameweeks</span></div>
+    <div class="planner-grid">
+      <div>
+        <div class="panel">
+          <h3>Suggested transfers <span style="color:var(--dim);text-transform:none;letter-spacing:0">· from the optimal squad</span></h3>
+          <div class="plan-controls">
+            <label>Free transfers <select id="freeT"><option>1</option><option>2</option><option>0</option></select></label>
+            <label>Max transfers <select id="maxT"><option>1</option><option selected>2</option><option>3</option></select></label>
+          </div>
+          <div id="transferOut"></div>
+          <div id="netGain" class="net"></div>
+          <div class="status" id="planStatus"></div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h3>Chip hints</h3>
+          <div class="chips" id="chips"></div>
+          <div style="color:var(--dim);font-size:.72rem;margin-top:8px">Heuristic over the horizon — TC = best single captain GW, BB = strongest bench GW.</div>
+        </div>
+      </div>
+      <div class="tbl-card"><div class="tbl-scroll" style="max-height:520px">
+        <table><thead><tr id="planHead"></tr></thead><tbody id="planBody"></tbody></table>
+      </div></div>
+    </div>
+  </section>
+</div>
+<footer>Built on a leakage-free walk-forward model · <b>GAFFER</b> · predictions are estimates, football is chaos ⚽</footer>
+</template>
+
+<script src="app.js"></script>
+</body>
+</html>

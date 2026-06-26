@@ -1,153 +1,140 @@
+"""
+FPL prediction + decision pipeline (rebuilt), season-aware.
+
+What it does, depending on where the season is:
+  * Mid-season (enough played gameweeks): walk-forward evaluation vs baselines,
+    then train on all data and FORECAST the next unplayed gameweek.
+  * New-season opener (little/no current-season data yet): skip evaluation (nothing
+    to score), train on LAST season, and forecast GW1 via the cold-start profiles.
+
+The forecast target is always the next UNFINISHED gameweek read from fixtures, so
+it self-adjusts as the real season progresses.
+
+Run:
+  python data_ingestion.py                      # pull current-season data (needs internet)
+  python main.py                                 # mid-season
+  FPL_PRIOR_SEASON_DIR=data_2025_26 python main.py   # new-season opener (train+seed from last year)
+  FPL_INGEST=1 python main.py                    # ingest fresh data first, then run
+"""
+from __future__ import annotations
+
 import os
 import logging
-import pandas as pd
-import numpy as np
-import plotly.express as px
-from data_ingestion import ingest_data
-from data_processing import process_data
-from model import train_model, predict_next_gameweek
 
-# Configure logging
+import pandas as pd
+
+from data_ingestion import ingest_data
+from data_processing import (
+    build_feature_table, build_upcoming_features, build_prior_profiles,
+    feature_columns, next_unfinished_round, load_overrides, POSITION_MAP,
+)
+from model import FPLPointsModel, make_predictor, engine_name
+from validation import evaluate_all
+from optimizer import optimize_squad
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("fpl_prediction.log"),
-        logging.StreamHandler()
-    ]
+    handlers=[logging.FileHandler("fpl_prediction.log"), logging.StreamHandler()],
 )
 logger = logging.getLogger(__name__)
 
-def plot_top100_price_vs_points(predictions: dict, player_gw_df: pd.DataFrame, 
-                                player_idlist_df: pd.DataFrame, playerraw_df: pd.DataFrame):
-    """
-    Plots a scatter plot of price vs. predicted fantasy points for the top 100 players.
-    Each point is labeled with the player's name and colored by position:
-      - Goalkeeper (element_type 1): blue
-      - Defender (element_type 2): green
-      - Midfielder (element_type 3): red
-      - Striker (element_type 4): purple
-    If playerraw_df is None, assigns default position (Unknown) with color gray.
-    The 'value' is divided by 10 to display the dollar price.
-    """
-    # Convert predictions dictionary to DataFrame
-    pred_df = pd.DataFrame(list(predictions.items()), columns=['player_id', 'predicted_points'])
-    pred_df['player_id'] = pred_df['player_id'].astype(int)
-    
-    # Get the latest record per player (assuming higher gameweek means more recent)
-    latest_player = player_gw_df.sort_values('gameweek').groupby('player_id').tail(1)
-    latest_player = latest_player[['player_id', 'value']]
-    latest_player['dollar_value'] = latest_player['value'] / 10.0  # convert to dollars
-    
-    # Merge predictions with latest price data
-    merged = pd.merge(pred_df, latest_player, on='player_id', how='inner')
-    
-    # Merge with player_idlist to get full names
-    merged = pd.merge(merged, player_idlist_df[['id', 'first_name', 'second_name']], 
-                      left_on='player_id', right_on='id', how='left')
-    merged['full_name'] = merged['first_name'] + " " + merged['second_name']
-    
-    # Merge with playerraw_df if available to get position; if not, assign default
-    if playerraw_df is not None:
-        merged = pd.merge(merged, playerraw_df[['id', 'element_type']], 
-                          left_on='player_id', right_on='id', how='left')
-    else:
-        merged['element_type'] = 0  # unknown position
-    
-    # Map element_type to colors
-    position_colors = {1: 'blue', 2: 'green', 3: 'red', 4: 'purple'}
-    merged['color'] = merged['element_type'].map(position_colors)
-    merged['color'] = merged['color'].fillna('gray')
-    
-    # Sort by predicted points descending and select top 100 players
-    top100 = merged.sort_values('predicted_points', ascending=False).head(100)
-    
-    # Create interactive scatter plot with Plotly
-    fig = px.scatter(
-        top100, x='dollar_value', y='predicted_points',
-        color='color', hover_name='full_name',
-        labels={'dollar_value': 'Price ($)', 'predicted_points': 'Predicted Fantasy Points'},
-        title='Top 100 Players by Predicted Fantasy Points vs Price'
-    )
-    fig.update_traces(marker=dict(size=10, line=dict(width=1, color='black')))
-    fig.show()
+N_TEST_ROUNDS = 6      # evaluate on the most recent N rounds
+MIN_TRAIN_ROUNDS = 8   # require at least this much history before scoring a round
+DATA_DIR = os.environ.get("FPL_DATA_DIR", "data")
 
-def analyze_errors(model, X_test: np.ndarray, y_test: np.ndarray, 
-                   player_gw_df: pd.DataFrame, player_idlist_df: pd.DataFrame):
-    """
-    Analyzes prediction errors and identifies players with the largest errors.
-    """
-    # Make predictions
-    y_pred = model.predict(X_test)
-    
-    # Calculate errors
-    errors = np.abs(y_test - y_pred.flatten())
-    
-    # Get player IDs and gameweeks from X_test
-    player_ids = player_gw_df['player_id'].values
-    gameweeks = player_gw_df['gameweek'].values
-    
-    # Create DataFrame for error analysis
-    error_df = pd.DataFrame({
-        'player_id': player_ids[-len(y_test):],  # Match test set size
-        'gameweek': gameweeks[-len(y_test):],
-        'actual_points': y_test,
-        'predicted_points': y_pred.flatten(),
-        'error': errors
-    })
-    
-    # Merge with player_idlist to get names
-    error_df = pd.merge(error_df, player_idlist_df[['id', 'first_name', 'second_name']], 
-                        left_on='player_id', right_on='id', how='left')
-    error_df['full_name'] = error_df['first_name'] + " " + error_df['second_name']
-    
-    # Sort by largest errors
-    top_errors = error_df.sort_values('error', ascending=False).head(10)
-    
-    # Log top errors
-    logger.info("\nTop 10 Players with Largest Prediction Errors:")
-    logger.info(top_errors[['full_name', 'gameweek', 'actual_points', 'predicted_points', 'error']])
 
-def main():
-    logger.info("Starting data ingestion...")
-    ingest_data()
-    logger.info("Data ingestion completed.\n")
-    
-    logger.info("Starting data processing...")
-    data = process_data()
-    if data["X"] is None or data["y"] is None or data["player_gw_df"] is None:
-        logger.error("No sequences created or no player gameweek data available. Exiting.")
+def _evaluate(table, feats) -> None:
+    max_round = int(table["round"].max())
+    test_rounds = list(range(max_round - N_TEST_ROUNDS + 1, max_round + 1))
+    logger.info("Walk-forward evaluation on rounds %s (model vs baselines)...", test_rounds)
+    results = evaluate_all(table, model_predictor=make_predictor(feats),
+                           test_rounds=test_rounds, min_train_rounds=MIN_TRAIN_ROUNDS)
+    logger.info("\n===== Walk-forward results (lower MAE/RMSE better) =====\n%s",
+                results.to_string(index=False))
+    model_mae = results.loc[results["method"] == "model", "MAE"].iloc[0]
+    best = results[results["method"] != "model"].sort_values("MAE").iloc[0]
+    logger.info("Model %s the best baseline (%s): MAE %.3f vs %.3f",
+                "BEATS" if model_mae < best["MAE"] else "DOES NOT beat",
+                best["method"], model_mae, best["MAE"])
+
+
+def main() -> None:
+    pd.set_option("display.width", 140)
+
+    if os.environ.get("FPL_INGEST") == "1":
+        logger.info("FPL_INGEST=1 -> pulling current-season data from the FPL API...")
+        ingest_data(DATA_DIR)
+
+    forecast_round = next_unfinished_round(DATA_DIR)
+    prior_dir = os.environ.get("FPL_PRIOR_SEASON_DIR")
+    # Cold-start profiles (if any) must seed BOTH the training table and the forecast,
+    # or the model sees a different feature definition at train vs forecast time.
+    profiles = build_prior_profiles(prior_dir, DATA_DIR) if prior_dir else None
+
+    table = build_feature_table(DATA_DIR, prior_profiles=profiles)
+    feats = feature_columns(table)
+    played_rounds = sorted(table["round"].unique())
+    logger.info("Engine: %s | %d features | %d played rounds | next unfinished GW: %s",
+                engine_name(), len(feats), len(played_rounds), forecast_round)
+
+    if forecast_round is None:
+        logger.warning("All fixtures are finished — the season is over. Nothing to forecast.")
         return
-    logger.info("Data processing completed.\n")
-    
-    logger.info("Starting model training...")
-    X = data["X"]
-    y = data["y"]
-    model, history = train_model(X, y)
-    logger.info("Model training completed.\n")
-    
-    logger.info("Predicting next gameweek fantasy points for each player...")
-    predictions = predict_next_gameweek(model=model, player_gw_df=data["player_gw_df"])
-    
-    # Use player_idlist and playerraw_df for mapping names and positions
-    player_idlist_df = data["player_idlist_df"]
-    playerraw_df = data["playerraw_df"]
-    
-    logger.info("\nPredictions:")
-    for pid, pred in predictions.items():
-        name_info = player_idlist_df.loc[player_idlist_df['id'] == pid, ['first_name', 'second_name']]
-        if not name_info.empty:
-            full_name = name_info.iloc[0]['first_name'] + " " + name_info.iloc[0]['second_name']
-        else:
-            full_name = f"Player {pid}"
-        logger.info(f"{full_name} (ID: {pid}): Predicted fantasy points for next gameweek = {pred:.2f}")
-    
-    logger.info("\nPlotting Top 100 Players: Price vs Predicted Fantasy Points...")
-    plot_top100_price_vs_points(predictions, data["player_gw_df"], player_idlist_df, playerraw_df)
-    
-    logger.info("\nAnalyzing prediction errors...")
-    analyze_errors(model, X_test=X[-len(y)//5:], y_test=y[-len(y)//5:],  # Use last 20% as test set
-                   player_gw_df=data["player_gw_df"], player_idlist_df=player_idlist_df)
+
+    opener = len(played_rounds) < MIN_TRAIN_ROUNDS + 2  # too little current-season data to validate
+
+    if not opener:
+        # ---- Mid-season: validate, then train on everything available ----
+        _evaluate(table, feats)
+        logger.info("Training final model on all data; FORECASTING round %d (no actuals)...",
+                    forecast_round)
+        model = FPLPointsModel().fit(table, feats)
+    else:
+        # ---- New-season opener: no within-season history to learn/validate on ----
+        logger.info("SEASON-OPENER mode: only %d played round(s) — skipping walk-forward "
+                    "(nothing to validate yet).", len(played_rounds))
+        if not prior_dir:
+            logger.error("Opener needs last season's data to train + seed. Re-run with "
+                         "FPL_PRIOR_SEASON_DIR=<last-season-dir>. Aborting.")
+            return
+        logger.info("Training on prior season (%s, seeded) and forecasting GW%d via cold-start.",
+                    prior_dir, forecast_round)
+        prior_table = build_feature_table(prior_dir, prior_profiles=profiles)
+        model = FPLPointsModel().fit(prior_table, feature_columns(prior_table))
+
+    # ---- Forecast the next unplayed gameweek + optimize the squad ----
+    upcoming = build_upcoming_features(DATA_DIR, target_round=forecast_round, prior_profiles=profiles)
+    upcoming["raw_pred"] = model.predict(upcoming)
+    # Downweight injured/suspended/doubtful players using current availability
+    # (a live signal known before kickoff; illustrative only on an offline snapshot).
+    upcoming["pred"] = upcoming["raw_pred"] * upcoming["availability"]
+    logger.info("Applied availability downweight to %d flagged players.",
+                int((upcoming["availability"] < 1.0).sum()))
+    # Manual opener overrides (final team news / friendly lineups), kept out of the model.
+    overrides = load_overrides(DATA_DIR, dict(zip(upcoming["name"], upcoming["player_id"])))
+    if overrides:
+        mult = upcoming["player_id"].map(overrides).fillna(1.0)
+        upcoming["pred"] = upcoming["pred"] * mult
+        logger.info("Applied %d manual minutes overrides.", int((mult != 1.0).sum()))
+
+    top = upcoming.sort_values("pred", ascending=False).head(15)
+    logger.info("\nTop 15 FORECAST players for round %d (upcoming, unplayed):\n%s", forecast_round,
+                top.assign(pos=top["element_type"].map(POSITION_MAP))
+                   [["name", "pos", "value", "pred"]].to_string(index=False))
+
+    logger.info("Optimizing squad under FPL constraints for round %d...", forecast_round)
+    players = upcoming.rename(columns={"element_type": "pos"})
+    players["price"] = players["value"] / 10.0
+    sol = optimize_squad(players[["player_id", "name", "pos", "team", "price", "pred"]])
+    squad = sol.squad.assign(pos=lambda d: d["pos"].map(POSITION_MAP))
+    logger.info("\n===== Optimal squad (£%.1fm, XI expected %.1f pts) =====\n%s",
+                sol.total_cost, sol.xi_expected_points,
+                squad[["name", "pos", "team", "price", "pred", "in_xi", "is_captain"]]
+                .to_string(index=False))
+    captain = squad[squad["is_captain"]].iloc[0]
+    logger.info("Captain: %s (%.1f predicted pts, doubled)", captain["name"], captain["pred"])
+
 
 if __name__ == "__main__":
     main()

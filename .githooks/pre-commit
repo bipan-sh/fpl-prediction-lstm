@@ -1,0 +1,24 @@
+#!/bin/sh
+# Enforce the changelog discipline (see CLAUDE.md): every commit must update
+# CHANGELOG.md. Bypass a genuine exception with `git commit --no-verify`.
+
+staged=$(git diff --cached --name-only)
+
+# Nothing staged (e.g. merge) -> let git handle it.
+[ -z "$staged" ] && exit 0
+
+if echo "$staged" | grep -qx "CHANGELOG.md"; then
+    exit 0
+fi
+
+cat >&2 <<'MSG'
+✗ Commit blocked: CHANGELOG.md was not updated.
+
+  Every change must add a timestamped entry to CHANGELOG.md (newest first):
+    ## YYYY-MM-DD
+    ### HH:MM — what changed and why
+
+  Then `git add CHANGELOG.md` and commit again.
+  Genuine exception? Re-run with: git commit --no-verify
+MSG
+exit 1

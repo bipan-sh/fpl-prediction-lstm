@@ -1,102 +1,152 @@
+"""
+Live data ingestion from the OFFICIAL Fantasy Premier League API.
+
+Why this replaces the old ingestion
+------------------------------------
+The previous version scraped a hardcoded `2024-25/` folder from the community
+repo vaastav/Fantasy-Premier-League. That repo STOPPED its weekly updates after
+the 2024-25 season, so it cannot feed a model for the upcoming season. The
+official FPL API is free, live, and authoritative, so we make it the primary
+feed. Raw JSON is cached to disk so re-runs are reproducible and offline-friendly.
+
+Endpoints used (no API key required):
+  * bootstrap-static/        -> players (elements), teams, positions, prices
+  * fixtures/                -> all fixtures + difficulty
+  * element-summary/{id}/    -> per-player per-gameweek history (incl. `round`,
+                                minutes, total_points, expected_goals, ...)
+
+Output layout (identical to what data_processing.py expects):
+  data/players_raw.csv          (elements / static player attributes)
+  data/teams.csv                (team strengths)
+  data/player_idlist.csv        (id, first_name, second_name)
+  data/fixtures.csv
+  data/players/<First_Second_id>/gw.csv   (one file per player, with `round`)
+
+Note: requires network access to fantasy.premierleague.com.
+"""
+from __future__ import annotations
+
 import os
+import json
+import time
+import logging
+from typing import Optional
+
 import pandas as pd
 import requests
-from io import StringIO
 
-# Base URL for raw files from GitHub
-raw_base_url = "https://raw.githubusercontent.com/vaastav/Fantasy-Premier-League/master/data/2024-25/"
+logger = logging.getLogger(__name__)
 
-def load_csv_from_url(relative_path):
+BASE = "https://fantasy.premierleague.com/api"
+HEADERS = {"User-Agent": "Mozilla/5.0 (fpl-prediction-pipeline)"}
+REQUEST_PAUSE = 0.3          # be polite to the API
+TIMEOUT = 15
+
+
+def _session() -> requests.Session:
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    return s
+
+
+def _get_json(session: requests.Session, url: str, cache_path: Optional[str] = None,
+              use_cache: bool = True) -> Optional[dict]:
+    """GET JSON with on-disk caching and basic retry."""
+    if cache_path and use_cache and os.path.exists(cache_path):
+        with open(cache_path, "r", encoding="utf-8") as fh:
+            return json.load(fh)
+    for attempt in range(3):
+        try:
+            resp = session.get(url, timeout=TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            if cache_path:
+                os.makedirs(os.path.dirname(cache_path), exist_ok=True)
+                with open(cache_path, "w", encoding="utf-8") as fh:
+                    json.dump(data, fh)
+            return data
+        except Exception as exc:
+            logger.warning("GET %s failed (attempt %d/3): %s", url, attempt + 1, exc)
+            time.sleep(1.5 * (attempt + 1))
+    return None
+
+
+def ingest_data(base_dir: str = "data", use_cache: bool = False,
+                max_players: Optional[int] = None) -> None:
+    """Download current-season FPL data and write the on-disk layout.
+
+    use_cache defaults to False so each run pulls FRESH data (the FPL API updates
+    after every gameweek). Set use_cache=True only for offline/dev reuse of a
+    previously-downloaded snapshot.
     """
-    Given a relative path, construct the raw URL, download the CSV,
-    and load it into a DataFrame using UTF-8 encoding.
-    """
-    url = raw_base_url + relative_path
-    try:
-        response = requests.get(url)
-        response.raise_for_status()
-        response.encoding = 'utf-8'
-        df = pd.read_csv(StringIO(response.text), encoding='utf-8')
-        print("Loaded '{}' with shape {}".format(relative_path, df.shape))
-        return df
-    except Exception as e:
-        print("Error loading '{}': {}".format(relative_path, e))
-        return None
+    os.makedirs(base_dir, exist_ok=True)
+    cache_dir = os.path.join(base_dir, "cache")
+    session = _session()
 
-def save_df_to_local(df, local_path):
-    """Save DataFrame to a local CSV file, creating directories if necessary."""
-    os.makedirs(os.path.dirname(local_path), exist_ok=True)
-    df.to_csv(local_path, index=False, encoding='utf-8')
-    print("Saved file to", local_path)
+    # --- bootstrap-static: players, teams ---
+    boot = _get_json(session, f"{BASE}/bootstrap-static/",
+                     os.path.join(cache_dir, "bootstrap-static.json"), use_cache)
+    if boot is None:
+        raise RuntimeError("Could not reach the FPL API (bootstrap-static). Check network.")
 
-def ingest_data():
-    """
-    Downloads required data files from GitHub and saves them locally.
-    This includes key files, Understat data, and all players' gameweek data.
-    """
-    base_local_dir = "data"
-    os.makedirs(base_local_dir, exist_ok=True)
+    elements = pd.DataFrame(boot["elements"])
+    teams = pd.DataFrame(boot["teams"])
+    elements.to_csv(os.path.join(base_dir, "players_raw.csv"), index=False)
+    teams.to_csv(os.path.join(base_dir, "teams.csv"), index=False)
+    elements[["id", "first_name", "second_name"]].to_csv(
+        os.path.join(base_dir, "player_idlist.csv"), index=False)
+    logger.info("Saved %d players and %d teams", len(elements), len(teams))
 
-    # --- Download key files from the root of the data directory ---
-    key_files = ["teams.csv", "fixtures.csv", "player_idlist.csv", "players_raw.csv"]
-    for file_name in key_files:
-        df = load_csv_from_url(file_name)
-        if df is not None:
-            local_path = os.path.join(base_local_dir, file_name)
-            save_df_to_local(df, local_path)
+    # --- fixtures ---
+    fixtures = _get_json(session, f"{BASE}/fixtures/",
+                         os.path.join(cache_dir, "fixtures.json"), use_cache)
+    if fixtures is not None:
+        pd.DataFrame(fixtures).to_csv(os.path.join(base_dir, "fixtures.csv"), index=False)
 
-    # --- Ingest Understat files using the GitHub API ---
-    understat_local_dir = os.path.join(base_local_dir, "understat")
-    os.makedirs(understat_local_dir, exist_ok=True)
-    api_url = "https://api.github.com/repos/vaastav/Fantasy-Premier-League/contents/data/2024-25/understat"
-    try:
-        response = requests.get(api_url)
-        response.raise_for_status()
-    except Exception as e:
-        print("Error accessing GitHub API for Understat files:", e)
-        return
-    files = response.json()
-    for file in files:
-        if file.get('type') == 'file' and file.get('name', '').endswith('.csv'):
-            name = file.get('name')
-            download_url = file.get('download_url')
-            try:
-                df = pd.read_csv(download_url, encoding='utf-8')
-                local_file_path = os.path.join(understat_local_dir, name)
-                save_df_to_local(df, local_file_path)
-            except Exception as e:
-                safe_name = name.encode('utf-8', 'replace').decode('utf-8')
-                print("Error saving Understat file '{}': {}".format(safe_name, e))
+    # --- per-player gameweek history ---
+    players_dir = os.path.join(base_dir, "players")
+    os.makedirs(players_dir, exist_ok=True)
+    ids = elements["id"].tolist()
+    if max_players:
+        ids = ids[:max_players]
 
-    # --- Ingest all players' gameweek data ---
-    players_local_dir = os.path.join(base_local_dir, "players")
-    os.makedirs(players_local_dir, exist_ok=True)
-    # Load the local player_idlist file
-    player_idlist_path = os.path.join(base_local_dir, "player_idlist.csv")
-    if os.path.exists(player_idlist_path):
-        player_idlist_df = pd.read_csv(player_idlist_path)
-    else:
-        print("Local player_idlist.csv not found.")
-        return
+    failed, past_rows = [], []
+    for n, pid in enumerate(ids, 1):
+        row = elements.loc[elements["id"] == pid].iloc[0]
+        folder = f"{row['first_name']}_{row['second_name']}_{int(pid)}".replace("/", "_")
+        summary = _get_json(session, f"{BASE}/element-summary/{pid}/",
+                            os.path.join(cache_dir, f"element-{pid}.json"), use_cache)
+        if summary is None:
+            failed.append(pid)
+            continue
+        # Prior-season totals: bootstrap-static resets per-player cumulatives to 0
+        # each season, so last season's form for cold-start MUST come from here.
+        for past in summary.get("history_past", []):
+            past_rows.append({**past, "player_id": pid})
+        if not summary.get("history"):
+            failed.append(pid)
+            continue
+        hist = pd.DataFrame(summary["history"])
+        hist["player_id"] = pid
+        # FPL history uses `round` already; keep it as the time axis.
+        out_dir = os.path.join(players_dir, folder)
+        os.makedirs(out_dir, exist_ok=True)
+        hist.to_csv(os.path.join(out_dir, "gw.csv"), index=False)
+        if not use_cache:
+            time.sleep(REQUEST_PAUSE)
+        if n % 100 == 0:
+            logger.info("  ...ingested %d/%d players", n, len(ids))
 
-    for idx, row in player_idlist_df.iterrows():
-        # Construct folder name in the format "FirstName_SecondName_ID"
-        folder_name = f"{row['first_name']}_{row['second_name']}_{int(row['id'])}"
-        relative_path = f"players/{folder_name}/gw.csv"
-        df = load_csv_from_url(relative_path)
-        if df is not None:
-            # Save the file preserving folder structure: data/players/<folder_name>/gw.csv
-            folder_path = os.path.join(players_local_dir, folder_name)
-            os.makedirs(folder_path, exist_ok=True)
-            local_file_path = os.path.join(folder_path, "gw.csv")
-            df['player_id'] = row['id']
-            # If a gameweek column is missing, add one (assumes row order reflects gameweeks)
-            if 'gameweek' not in df.columns:
-                df = df.reset_index().rename(columns={'index': 'gameweek'})
-                df['gameweek'] = df['gameweek'] + 1
-            save_df_to_local(df, local_file_path)
+    if past_rows:  # one row per (player, past season) with totals incl. minutes, xG, etc.
+        pd.DataFrame(past_rows).to_csv(os.path.join(base_dir, "history_past.csv"), index=False)
+        logger.info("Saved history_past.csv (%d player-season rows)", len(past_rows))
 
-    print("\nData ingestion complete. All files are saved in the 'data' directory.")
+    logger.info("Ingestion complete. %d players written, %d failed.",
+                len(ids) - len(failed), len(failed))
+    if failed:
+        logger.warning("Failed player ids (no history / fetch error): %s", failed[:20])
+
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     ingest_data()
