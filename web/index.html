@@ -175,6 +175,25 @@ td{padding:9px 12px;white-space:nowrap}
 .legend{display:flex;gap:16px;font-size:.74rem;color:var(--muted);margin-top:8px;font-family:var(--mono)}
 .legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px}
 
+/* planner */
+.planner-grid{display:grid;grid-template-columns:.95fr 1.3fr;gap:22px}
+.plan-controls{display:flex;gap:14px;margin-bottom:14px}
+.plan-controls label{font-size:.74rem;color:var(--muted);display:flex;flex-direction:column;gap:5px;font-family:var(--mono)}
+.xfer{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:9px;margin-bottom:7px;font-size:.85rem;background:var(--bg2);border:1px solid var(--line)}
+.xfer .dir{font-family:var(--mono);font-weight:700;font-size:.72rem;width:30px;text-align:center;border-radius:5px;padding:2px 0}
+.xfer.in .dir{background:rgba(0,255,135,.16);color:var(--green)}
+.xfer.out .dir{background:rgba(233,0,82,.16);color:#ff5e93}
+.xfer .arrow{color:var(--dim)}
+.net{font-family:var(--mono);font-weight:700;font-size:1.05rem;margin-top:10px}
+.net.up{color:var(--green)} .net.flat{color:var(--muted)}
+.chips{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.chipcard{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:12px}
+.chipcard .ct{font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;color:var(--muted)}
+.chipcard .cg{font-family:var(--mono);font-size:1.4rem;font-weight:700;color:var(--cyan);margin-top:3px}
+.chipcard .cv{font-size:.72rem;color:var(--dim);font-family:var(--mono)}
+td.gwcell{font-family:var(--mono);text-align:right;color:var(--muted)}
+td.hz{font-family:var(--mono);text-align:right;color:var(--green);font-weight:700}
+@media(max-width:900px){.planner-grid{grid-template-columns:1fr}}
 footer{padding:40px 0;color:var(--dim);font-size:.78rem;text-align:center;border-top:1px solid var(--line);margin-top:20px}
 footer b{color:var(--muted)}
 .loading{padding:80px 0;text-align:center;color:var(--muted);font-family:var(--mono)}
@@ -266,6 +285,32 @@ footer b{color:var(--muted)}
     <div class="scatter-card">
       <canvas id="scatter"></canvas>
       <div class="legend"><span><i style="background:var(--gk)"></i>GK</span><span><i style="background:var(--def)"></i>DEF</span><span><i style="background:var(--mid)"></i>MID</span><span><i style="background:var(--fwd)"></i>FWD</span><span style="margin-left:auto">● = in optimal squad</span></div>
+    </div>
+  </section>
+
+  <section id="plannerSection">
+    <div class="shead"><span class="num">04</span><h2>Multi-GW Planner</h2><span class="hint" id="planHint">projected points over the next gameweeks</span></div>
+    <div class="planner-grid">
+      <div>
+        <div class="panel">
+          <h3>Suggested transfers <span style="color:var(--dim);text-transform:none;letter-spacing:0">· from the optimal squad</span></h3>
+          <div class="plan-controls">
+            <label>Free transfers <select id="freeT"><option>1</option><option>2</option><option>0</option></select></label>
+            <label>Max transfers <select id="maxT"><option>1</option><option selected>2</option><option>3</option></select></label>
+          </div>
+          <div id="transferOut"></div>
+          <div id="netGain" class="net"></div>
+          <div class="status" id="planStatus"></div>
+        </div>
+        <div class="panel" style="margin-top:14px">
+          <h3>Chip hints</h3>
+          <div class="chips" id="chips"></div>
+          <div style="color:var(--dim);font-size:.72rem;margin-top:8px">Heuristic over the horizon — TC = best single captain GW, BB = strongest bench GW.</div>
+        </div>
+      </div>
+      <div class="tbl-card"><div class="tbl-scroll" style="max-height:520px">
+        <table><thead><tr id="planHead"></tr></thead><tbody id="planBody"></tbody></table>
+      </div></div>
     </div>
   </section>
 </div>

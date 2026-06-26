@@ -10,6 +10,14 @@ commit times (`git log --date=format:'%Y-%m-%d %H:%M'`).
 
 ## 2026-06-26
 
+### 08:48 — Surfaced the multi-GW planner in the web UI
+- `serve.py`: precompute now builds 5-GW horizon projections + chip hints (cached);
+  each player carries `horizon` + per-GW points; new `GET /api/plan?k=&free=&bank=`
+  returns live transfer suggestions from the optimal squad. Cache version bumped to v4.
+- `web/`: new "Multi-GW Planner" section — projected-points table (per GW + Σ),
+  suggested transfers (with the −4 hit), and Triple Captain / Bench Boost GW hints.
+- Verified via API + a Chrome-headless screenshot.
+
 ### 05:55 — Added changelog discipline
 - Created this `CHANGELOG.md`, `CLAUDE.md` (working agreement), and a `.githooks/pre-commit`
   hook that blocks commits which don't update the changelog (`git config core.hooksPath .githooks`).

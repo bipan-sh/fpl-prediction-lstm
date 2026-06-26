@@ -21,6 +21,46 @@ async function init() {
   $("#gwk").textContent = DATA.meta.gw ?? "–";
   buildTeamSelect(); buildThead(); wire();
   renderSquad(); renderTable(); drawScatter();
+  renderPlanner();
+}
+
+/* ---------------- multi-GW planner ---------------- */
+function renderPlanner() {
+  const rounds = DATA.meta.horizonRounds || [];
+  if (!rounds.length) { document.getElementById("plannerSection").style.display = "none"; return; }
+  $("#planHint").textContent = `projected points over GW ${rounds[0]}–${rounds[rounds.length - 1]}`;
+  // chip hints
+  const c = DATA.chips || {};
+  const chip = (t, o) => o ? `<div class="chipcard"><div class="ct">${t}</div><div class="cg">GW${o.gw}</div><div class="cv">${o.value} pts</div></div>` : "";
+  $("#chips").innerHTML = chip("Triple Captain", c.tripleCaptain) + chip("Bench Boost", c.benchBoost);
+  // horizon table (top 15 by horizon)
+  $("#planHead").innerHTML = `<th>Player</th><th>Pos</th>` +
+    rounds.map(r => `<th class="num">GW${r}</th>`).join("") + `<th class="num">Σ</th>`;
+  const top = [...DATA.players].filter(p => p.horizon != null).sort((a, b) => b.horizon - a.horizon).slice(0, 15);
+  $("#planBody").innerHTML = top.map(p => `<tr>
+    <td class="nm-cell">${short(p.name)}</td><td><span class="ppos ${p.posLabel}">${p.posLabel}</span></td>
+    ${rounds.map(r => `<td class="gwcell">${(p.gws && p.gws[r] != null) ? p.gws[r].toFixed(1) : "–"}</td>`).join("")}
+    <td class="hz">${p.horizon.toFixed(1)}</td></tr>`).join("");
+  loadTransfers();
+}
+function loadTransfers() {
+  $("#planStatus").textContent = "Computing best transfers…";
+  const qs = new URLSearchParams({ k: $("#maxT").value, free: $("#freeT").value });
+  fetch("/api/plan?" + qs).then(r => r.json()).then(s => {
+    if (s.error) { $("#planStatus").textContent = "⚠ " + s.error; return; }
+    const row = (d, x) => `<div class="xfer ${d === "IN" ? "in" : "out"}"><span class="dir">${d}</span>${x.name}</div>`;
+    const pairs = Math.max((s.transfers_in || []).length, (s.transfers_out || []).length);
+    let html = "";
+    for (let i = 0; i < pairs; i++) {
+      if (s.transfers_out[i]) html += row("OUT", s.transfers_out[i]);
+      if (s.transfers_in[i]) html += row("IN", s.transfers_in[i]);
+    }
+    $("#transferOut").innerHTML = html || '<div style="color:var(--dim);font-size:.85rem">No transfer improves the squad — hold.</div>';
+    const ng = s.net_gain || 0;
+    $("#netGain").className = "net " + (ng > 0.05 ? "up" : "flat");
+    $("#netGain").textContent = `Net ${ng >= 0 ? "+" : ""}${ng.toFixed(1)} pts over horizon` + (s.hits ? ` (${s.hits} hit${s.hits > 1 ? "s" : ""}, −${4 * s.hits})` : "");
+    $("#planStatus").textContent = "";
+  }).catch(() => $("#planStatus").textContent = "⚠ planner unavailable");
 }
 
 function renderBanner() {
@@ -224,4 +264,7 @@ function wire() {
   const b = $("#budget");
   b.addEventListener("input", () => { $("#budgetVal").innerHTML = `£${(+b.value).toFixed(1)}<small>m</small>`; clearTimeout(timer); timer = setTimeout(reoptimize, 280); });
   window.addEventListener("resize", () => { clearTimeout(timer); timer = setTimeout(drawScatter, 150); });
+  const ft = $("#freeT"), mt = $("#maxT");
+  if (ft) ft.addEventListener("change", loadTransfers);
+  if (mt) mt.addEventListener("change", loadTransfers);
 }

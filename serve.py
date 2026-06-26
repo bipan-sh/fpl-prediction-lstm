@@ -30,6 +30,7 @@ from data_processing import (
 from model import FPLPointsModel, make_predictor, engine_name
 from validation import walk_forward_predict, compute_metrics, BASELINES
 from optimizer import optimize_squad
+from planner import horizon_projections, suggest_transfers, chip_hints
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
@@ -48,7 +49,7 @@ def _fingerprint() -> dict:
         return os.path.getmtime(p) if os.path.exists(p) else 0
     gw_files = glob.glob(os.path.join(DATA_DIR, "players", "*", "gw.csv"))
     return {
-        "v": 3,  # bump when the pipeline/feature set changes so the cache rebuilds
+        "v": 4,  # bump when the pipeline/feature set changes so the cache rebuilds
         "dir": os.path.abspath(DATA_DIR),
         "prior": os.environ.get("FPL_PRIOR_SEASON_DIR", ""),
         "n_gw": len(gw_files),
@@ -140,18 +141,45 @@ def precompute() -> None:
 
     pdf = up.rename(columns={"element_type": "pos"}).copy()
     pdf["price"] = pdf["value"] / 10.0
+
+    # ---- Multi-gameweek planner: project the next few GWs + chip hints ----
+    proj_df, gw_rounds, chips = None, [], {}
+    try:
+        proj_df = horizon_projections(model, DATA_DIR, start_round=gw, horizon=5, profiles=profiles)
+        gw_rounds = [int(c[2:]) for c in proj_df.columns if c.startswith("gw")]
+    except Exception as exc:
+        logger.warning("Horizon projection failed: %s", exc)
+
+    pid_horizon = {}
+    if proj_df is not None:
+        gw_cols = [f"gw{r}" for r in gw_rounds]
+        for _, r in proj_df.iterrows():
+            pid_horizon[int(r["player_id"])] = {
+                "horizon": round(float(r["horizon"]), 1),
+                "gws": {int(c[2:]): round(float(r[c]), 1) for c in gw_cols},
+            }
+    for p in players:  # attach horizon projection to each player
+        h = pid_horizon.get(p["id"], {})
+        p["horizon"] = h.get("horizon")
+        p["gws"] = h.get("gws", {})
+
     STATE.update({
         "players_df": pdf[["player_id", "name", "pos", "team", "price", "pred"]],
+        "proj_df": proj_df,
         "meta": {
             "season": os.environ.get("FPL_SEASON_LABEL", "2024-25 archive (demo)"),
             "gw": gw, "mode": mode, "engine": engine_name(),
             "nPlayers": len(players), "metric": metric, "budget": 100.0,
+            "horizonRounds": gw_rounds,
             "generatedAt": datetime.now().strftime("%Y-%m-%d %H:%M"),
         },
         "players": players,
         "teams": {int(k): v for k, v in team_name.items()},
     })
     STATE["squad"] = _solve()
+    if proj_df is not None:
+        squad_ids = [p["id"] for p in STATE["squad"]["picks"]]
+        STATE["chips"] = chip_hints(proj_df, squad_ids, [f"gw{r}" for r in gw_rounds])
     STATE["_fp"] = fp
     try:
         os.makedirs(os.path.dirname(CACHE_FILE), exist_ok=True)
@@ -189,6 +217,7 @@ class Handler(BaseHTTPRequestHandler):
         u = urlparse(self.path)
         if u.path in ("/api/data",):
             payload = {k: STATE[k] for k in ("meta", "players", "teams", "squad")}
+            payload["chips"] = STATE.get("chips", {})
             return self._send(200, json.dumps(payload))
         if u.path == "/api/optimize":
             q = parse_qs(u.query)
@@ -198,6 +227,23 @@ class Handler(BaseHTTPRequestHandler):
                 exclude = [int(x) for x in q.get("exclude", [""])[0].split(",") if x]
                 return self._send(200, json.dumps(_solve(budget, lock, exclude)))
             except Exception as exc:  # infeasible / bad input
+                return self._send(200, json.dumps({"error": str(exc)}))
+        if u.path == "/api/plan":
+            q = parse_qs(u.query)
+            try:
+                if STATE.get("proj_df") is None:
+                    return self._send(200, json.dumps({"error": "no projection available"}))
+                k = int(q.get("k", ["2"])[0])
+                free = int(q.get("free", ["1"])[0])
+                bank = float(q.get("bank", ["0"])[0])
+                ids = q.get("squad", [""])[0]
+                squad_ids = ([int(x) for x in ids.split(",") if x]
+                             or [p["id"] for p in STATE["squad"]["picks"]])
+                s = suggest_transfers(STATE["proj_df"], squad_ids,
+                                      max_transfers=k, free_transfers=free, bank=bank)
+                s.pop("horizon_squad", None)  # not JSON-serializable
+                return self._send(200, json.dumps(s))
+            except Exception as exc:
                 return self._send(200, json.dumps({"error": str(exc)}))
         # static files
         path = "/index.html" if u.path == "/" else u.path
