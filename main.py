@@ -26,7 +26,7 @@ import pandas as pd
 from data_ingestion import ingest_data
 from data_processing import (
     build_feature_table, build_upcoming_features, build_prior_profiles,
-    feature_columns, next_unfinished_round, POSITION_MAP,
+    feature_columns, next_unfinished_round, load_overrides, POSITION_MAP,
 )
 from model import FPLPointsModel, make_predictor, engine_name
 from validation import evaluate_all
@@ -111,6 +111,12 @@ def main() -> None:
     upcoming["pred"] = upcoming["raw_pred"] * upcoming["availability"]
     logger.info("Applied availability downweight to %d flagged players.",
                 int((upcoming["availability"] < 1.0).sum()))
+    # Manual opener overrides (final team news / friendly lineups), kept out of the model.
+    overrides = load_overrides(DATA_DIR, dict(zip(upcoming["name"], upcoming["player_id"])))
+    if overrides:
+        mult = upcoming["player_id"].map(overrides).fillna(1.0)
+        upcoming["pred"] = upcoming["pred"] * mult
+        logger.info("Applied %d manual minutes overrides.", int((mult != 1.0).sum()))
 
     top = upcoming.sort_values("pred", ascending=False).head(15)
     logger.info("\nTop 15 FORECAST players for round %d (upcoming, unplayed):\n%s", forecast_round,

@@ -1,0 +1,9 @@
+# Manual opener overrides — copy to data/overrides.csv to activate.
+# minutes_mult multiplies a player's final predicted points (kept OUT of the model):
+#   0.0 = won't play (suspended / not in squad)   0.5 = rotation or fatigue risk
+#   1.0 = confirmed starter (override a stale flag) 1.1 = nailed-on / extra set-piece role
+# Identify a player by player_id (preferred) OR name ("First Second"). 'note' is for you.
+player_id,name,minutes_mult,note
+,Mohamed Salah,1.0,confirmed starter despite a stale injury flag
+,Alexander Isak,0.5,returned late from international duty - rotation risk
+,Example Suspended Player,0.0,one-match ban

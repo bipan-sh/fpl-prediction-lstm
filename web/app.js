@@ -173,7 +173,7 @@ function renderTable() {
   $("#tbody").innerHTML = rows.slice(0, 400).map(p => {
     const dot = p.avail >= 1 ? "var(--green)" : p.avail > 0 ? "#e9d100" : "var(--magenta)";
     return `<tr>
-      <td class="nm-cell">${p.name}${inSquad.has(p.id) ? ' <span style="color:var(--green)">●</span>' : ''}</td>
+      <td class="nm-cell">${p.name}${inSquad.has(p.id) ? ' <span style="color:var(--green)">●</span>' : ''}${p.override != null ? ` <span title="manual override ×${p.override}" style="color:var(--cyan)">⚙</span>` : ''}</td>
       <td><span class="ppos ${p.posLabel}">${p.posLabel}</span></td>
       <td class="team-cell">${p.teamShort}</td>
       <td class="num">£${p.price.toFixed(1)}</td>

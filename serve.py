@@ -25,7 +25,7 @@ import pandas as pd
 
 from data_processing import (
     build_feature_table, build_upcoming_features, build_prior_profiles,
-    feature_columns, next_unfinished_round, POSITION_MAP,
+    feature_columns, next_unfinished_round, load_overrides, POSITION_MAP,
 )
 from model import FPLPointsModel, make_predictor, engine_name
 from validation import walk_forward_predict, compute_metrics, BASELINES
@@ -49,7 +49,8 @@ def _fingerprint() -> dict:
         return os.path.getmtime(p) if os.path.exists(p) else 0
     gw_files = glob.glob(os.path.join(DATA_DIR, "players", "*", "gw.csv"))
     return {
-        "v": 4,  # bump when the pipeline/feature set changes so the cache rebuilds
+        "v": 5,  # bump when the pipeline/feature set changes so the cache rebuilds
+        "overrides": mtime(os.path.join(DATA_DIR, "overrides.csv")),
         "dir": os.path.abspath(DATA_DIR),
         "prior": os.environ.get("FPL_PRIOR_SEASON_DIR", ""),
         "n_gw": len(gw_files),
@@ -118,7 +119,11 @@ def precompute() -> None:
 
     up = build_upcoming_features(DATA_DIR, target_round=gw, prior_profiles=profiles)
     up["raw_pred"] = model.predict(up)
-    up["pred"] = (up["raw_pred"] * up["availability"]).round(3)
+    up["pred"] = up["raw_pred"] * up["availability"]
+    # Manual opener overrides (team news / friendly lineups), kept out of the model.
+    overrides = load_overrides(DATA_DIR, dict(zip(up["name"], up["player_id"])))
+    up["override"] = up["player_id"].map(overrides).fillna(1.0)
+    up["pred"] = (up["pred"] * up["override"]).round(3)
 
     players = []
     for _, r in up.iterrows():
@@ -137,6 +142,7 @@ def precompute() -> None:
             "form": round(float(r["total_points_r5"]), 1) if pd.notna(r["total_points_r5"]) else None,
             "value": round(float(r["pred"]) / price, 2) if price else 0.0,
             "home": bool(r["was_home"] >= 0.5) if pd.notna(r["was_home"]) else None,
+            "override": round(float(r["override"]), 2) if float(r["override"]) != 1.0 else None,
         })
 
     pdf = up.rename(columns={"element_type": "pos"}).copy()

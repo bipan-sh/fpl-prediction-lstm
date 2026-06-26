@@ -10,6 +10,14 @@ commit times (`git log --date=format:'%Y-%m-%d %H:%M'`).
 
 ## 2026-06-26
 
+### 08:52 — Manual opener minutes/role override layer
+- `data_processing.load_overrides()` reads an optional `data/overrides.csv`
+  (player_id or name + `minutes_mult`) and multiplies the final prediction — kept
+  OUT of the model. The recommended way to fold in final friendly lineups, team
+  news, World Cup fatigue at the opener. Applied in `main.py` and `serve.py`
+  (exposed as an `override` flag per player; cache v5; ⚙ marker in the UI table).
+- Added `overrides.example.csv` template, a regression test, and README docs. Tests 8/8.
+
 ### 08:48 — Surfaced the multi-GW planner in the web UI
 - `serve.py`: precompute now builds 5-GW horizon projections + chip hints (cached);
   each player carries `horizon` + per-GW points; new `GET /api/plan?k=&free=&bank=`

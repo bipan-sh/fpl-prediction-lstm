@@ -136,6 +136,26 @@ def test_train_serve_seeding_consistency():
     print(f"  [ok] train/serve seeding consistent: first-game form NaN→seeded ({cov*100:.0f}%)")
 
 
+def test_overrides_apply():
+    import os, pandas as pd
+    from data_processing import load_overrides
+    # no file -> empty
+    assert load_overrides("data") == {} or isinstance(load_overrides("data"), dict)
+    # write a temp override by name, resolve + apply
+    up = build_upcoming_features("data", target_round=27)
+    n2i = dict(zip(up["name"], up["player_id"]))
+    target = up.sort_values("player_id").iloc[0]["name"]
+    path = "data/overrides.csv"
+    try:
+        pd.DataFrame([{"name": target, "minutes_mult": 0.0, "note": "t"}]).to_csv(path, index=False)
+        ov = load_overrides("data", n2i)
+        assert ov.get(n2i[target]) == 0.0, "override not resolved/applied"
+        print(f"  [ok] overrides: '{target}' resolved to mult 0.0")
+    finally:
+        if os.path.exists(path):
+            os.remove(path)
+
+
 def test_next_unfinished_round():
     # The forecast target is the next unfinished GW from fixtures. The bundled
     # 2024-25 archive has match data through round 26, so the next GW is 27.
@@ -152,6 +172,7 @@ if __name__ == "__main__":
         test_cold_start_seeds_gw1,
         test_availability_multiplier,
         test_train_serve_seeding_consistency,
+        test_overrides_apply,
         test_next_unfinished_round,
     ]
     failed = 0

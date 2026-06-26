@@ -105,6 +105,10 @@ API: `GET /api/data` (predictions + default squad), `GET /api/optimize?budget=&l
   model (feed them into the availability step), never as a scoring input.
 - **Set-piece duty** (penalty/free-kick/corner takers, from `players_raw`) is included: roughly
   redundant mid-season (form already encodes it) but valuable at the opener when form is cold.
+- **Manual opener overrides** — drop a `data/overrides.csv` (see `overrides.example.csv`) to nudge
+  a player's expected minutes from final friendly lineups / team news (`minutes_mult`: 0 = won't
+  play, 0.5 = rotation risk, 1.0 = confirmed starter, 1.1 = nailed-on). Applied on top of the
+  model, never as a feature — the recommended way to fold in WC fatigue and confirmed lineups.
 
 ## Backtest vs. forecast
 

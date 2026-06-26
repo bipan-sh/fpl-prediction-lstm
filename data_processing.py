@@ -393,6 +393,44 @@ def _availability_multiplier(feat: pd.DataFrame) -> np.ndarray:
     return out
 
 
+def load_overrides(base_dir: str = "data", name_to_id: Optional[dict] = None) -> dict:
+    """Manual minutes/role overrides for the forecast (kept OUT of the model).
+
+    Reads an optional `<base_dir>/overrides.csv` with columns:
+      player_id (or name), minutes_mult [, note]
+    `minutes_mult` multiplies the final prediction (e.g. 0 = won't play / suspended,
+    0.5 = rotation or fatigue risk, 1.0 = confirmed starter despite a stale flag,
+    1.1 = nailed-on). This is the recommended way to fold in final pre-season friendly
+    lineups, World Cup fatigue, and confirmed set-piece changes at the opener — signals
+    that are too noisy/unavailable to be model features. Returns {player_id: mult}.
+    """
+    path = os.path.join(base_dir, "overrides.csv")
+    if not os.path.exists(path):
+        return {}
+    try:
+        df = pd.read_csv(path)
+    except Exception as exc:
+        logger.warning("Could not read overrides.csv: %s", exc)
+        return {}
+    if "minutes_mult" not in df.columns:
+        return {}
+    out = {}
+    for _, r in df.iterrows():
+        mult = r["minutes_mult"]
+        if pd.isna(mult):
+            continue
+        pid = None
+        if "player_id" in df.columns and pd.notna(r.get("player_id")):
+            pid = int(r["player_id"])
+        elif "name" in df.columns and name_to_id is not None:
+            pid = name_to_id.get(str(r["name"]).strip())
+        if pid is not None:
+            out[int(pid)] = float(mult)
+    if out:
+        logger.info("Loaded %d manual minutes overrides from overrides.csv", len(out))
+    return out
+
+
 def build_prior_profiles(
     prior_base_dir: str, current_base_dir: Optional[str] = None, n_price_buckets: int = 5
 ) -> pd.DataFrame:
